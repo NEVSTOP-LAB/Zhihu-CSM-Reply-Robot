@@ -1,0 +1,20 @@
+# 监控的知乎文章/问题列表
+# 参考：docs/plan/README.md 四、关键配置文件格式
+#
+# 使用说明：
+#   - id: 知乎文章或问题的 ID（从 URL 中提取）
+#   - title: 文章/问题标题（仅用于日志和归档显示）
+#   - url: 原始链接（仅用于记录，不影响 API 调用）
+#   - type: "article"（专栏文章）或 "question"（问答）
+#
+# 注意：所有运行参数统一在 config/settings.yaml 中管理
+
+articles:
+  - id: "98765432"
+    title: "CSM 最佳实践系列（一）"
+    url: "https://zhuanlan.zhihu.com/p/98765432"
+    type: "article"
+  - id: "123456789"
+    title: "如何做好客户成功？"
+    url: "https://www.zhihu.com/question/123456789"
+    type: "question"
