@@ -1,5 +1,12 @@
 # Token 优化策略调研
 
+> **调研结论摘要**
+>
+> 综合优化后，相比"全量 Wiki + GPT-4o"基线方案，**月费用可降低 90%+**。
+> 最高优先级策略：**选用 DeepSeek-V3**（比 gpt-4o-mini 再便宜约 50%）+ **Prompt Caching**（批量处理同文章评论时缓存命中）。
+> RAG 精准检索（k=2~3 + 阈值过滤）减少注入量；历史追问上下文截取最近 6 轮避免过长。
+> DeepSeek 原生支持 KV 缓存，缓存命中时输入 token 仅 $0.07/1M，极低成本。
+
 ## 1. Token 消耗来源分析
 
 | 来源 | 占比（估算） | 优化空间 |
@@ -85,13 +92,33 @@ for comment in new_comments:
 
 ## 5. 选用低成本模型
 
-| 任务 | 推荐模型 | 原因 |
-|------|----------|------|
-| 日常评论回复 | gpt-4o-mini | 质量足够，费用极低 |
-| Wiki 片段压缩 | gpt-4o-mini | 轻量提取不需要大模型 |
-| Embedding（在线） | text-embedding-3-small | 最便宜，效果好 |
-| Embedding（离线） | BAAI/bge-small-zh-v1.5 | 免费，中文优化 |
-| 复杂/重要评论 | gpt-4o | 按需升级 |
+| 任务 | 推荐模型 | 输入价格（$/1M） | 输出价格（$/1M） | 原因 |
+|------|----------|-----------------|-----------------|------|
+| **日常评论回复** | **deepseek-chat** | $0.07（缓存）/ $0.27 | $1.10 | 中文最优，低成本 |
+| **复杂/投诉处理** | deepseek-reasoner | $0.14（缓存）/ $0.55 | $2.19 | 推理能力强 |
+| gpt-4o-mini（备选） | gpt-4o-mini | $0.15 | $0.60 | OpenAI 最低档 |
+| Wiki 片段压缩 | deepseek-chat | $0.27 | $1.10 | 轻量提取 |
+| Embedding（在线） | text-embedding-3-small | $0.02/1M | — | OpenAI 最便宜 |
+| Embedding（离线） | BAAI/bge-small-zh-v1.5 | $0 | — | 免费，中文优化 |
+
+> 价格参考：[DeepSeek Pricing](https://api-docs.deepseek.com/quick_start/pricing/) | [OpenAI Pricing](https://openai.com/pricing)
+
+### DeepSeek Prompt Caching
+
+DeepSeek 原生支持 KV Cache（服务端自动，无需代码改动）：
+
+```python
+# 无需任何额外参数，DeepSeek 自动缓存重复 System Prompt 前缀
+# 缓存命中：输入 token 费用 = $0.07/1M（标准价 $0.27/1M 的 26%）
+# 缓存检测：response.usage.prompt_cache_hit_tokens
+response = client.chat.completions.create(
+    model="deepseek-chat",
+    messages=[{"role": "system", "content": static_system_prompt}, ...],
+)
+print(f"缓存命中: {response.usage.prompt_cache_hit_tokens} tokens")
+```
+
+参考：[DeepSeek KV Cache Docs](https://api-docs.deepseek.com/guides/kv_cache)
 
 ## 6. 截断超长评论
 
@@ -119,13 +146,15 @@ client.chat.completions.create(
 
 | 策略 | 单次调用节省 |
 |------|------------|
-| Prompt Caching（同批次多评论） | 输入 token -50% |
+| 使用 deepseek-chat（vs gpt-4o） | 费用 -96%（输入）/ -89%（输出） |
+| 使用 deepseek-chat（vs gpt-4o-mini） | 费用 -44%（输入）/ -45%（输出） |
+| Prompt Caching（缓存命中时） | 输入 token -74%（DeepSeek） |
 | RAG k=2 + 阈值过滤 | 注入 token -30% |
 | 片段压缩 | 注入 token -40%（压缩后） |
 | max_tokens 限制 | 输出 token -20% |
-| 使用 gpt-4o-mini | 费用 -85%（vs gpt-4o） |
+| 追问截取最近 6 轮 | 历史 token 受控在 1500 以内 |
 
-> 综合优化后，相比"全量 Wiki + gpt-4o"方案，**费用可降低 90%以上**。
+> 综合优化后，相比"全量 Wiki + gpt-4o"方案，**费用可降低 95%以上**。
 
 ## 9. 参考资源
 
@@ -133,4 +162,5 @@ client.chat.completions.create(
 - [Minimize LLM Token Usage in RAG (apxml.com)](https://apxml.com/courses/optimizing-rag-for-production/chapter-5-cost-optimization-production-rag/minimize-llm-token-usage-rag)
 - [Context-Aware RAG - Microsoft](https://techcommunity.microsoft.com/blog/azure-ai-foundry-blog/context-aware-rag-system-with-azure-ai-search-to-cut-token-costs-and-boost-accur/4456810)
 - [Prompt Caching Comparison (OpenAI vs Anthropic)](https://www.prompthub.us/blog/prompt-caching-with-openai-anthropic-and-google-models)
-- [Long Context RAG Performance - Databricks](https://www.databricks.com/blog/long-context-rag-performance-llms)
+- [DeepSeek KV Cache / Prompt Caching](https://api-docs.deepseek.com/guides/kv_cache)
+- [DeepSeek API Pricing](https://api-docs.deepseek.com/quick_start/pricing/)
