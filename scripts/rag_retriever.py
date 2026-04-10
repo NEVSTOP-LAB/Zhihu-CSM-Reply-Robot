@@ -374,9 +374,9 @@ class RAGRetriever:
                         reply_results["distances"],
                     ):
                         for doc, dist in zip(docs, distances):
-                            # ChromaDB 返回的是 L2 距离，转换为相似度
-                            # 对于归一化向量: similarity = 1 - distance/2
-                            similarity = 1 - dist / 2
+                            # ChromaDB 返回 L2 距离，对于 L2 归一化向量:
+                            # dist^2 = 2 - 2*cosine，因此 cosine = 1 - dist^2/2
+                            similarity = 1 - (dist ** 2) / 2
                             if similarity >= threshold:
                                 results.append(doc)
         except Exception as e:
@@ -399,7 +399,8 @@ class RAGRetriever:
                             wiki_results["distances"],
                         ):
                             for doc, dist in zip(docs, distances):
-                                similarity = 1 - dist / 2
+                                # cosine = 1 - dist^2/2（L2 归一化向量）
+                                similarity = 1 - (dist ** 2) / 2
                                 if similarity >= threshold:
                                     results.append(doc)
             except Exception as e:

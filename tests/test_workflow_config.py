@@ -38,12 +38,12 @@ class TestBotWorkflow:
         assert "schedule" in triggers, "缺少 schedule 触发器"
 
     def test_cron_expression_valid(self, workflow: dict):
-        """cron 表达式应为每6小时"""
+        """cron 表达式应为每15分钟"""
         triggers = workflow.get("on", workflow.get(True, {}))
         schedules = triggers.get("schedule", [])
         assert len(schedules) > 0, "schedule 列表为空"
         cron = schedules[0].get("cron", "")
-        assert "2,8,14,20" in cron, f"cron 应为每6小时，实际: {cron}"
+        assert "*/15" in cron, f"cron 应为每15分钟，实际: {cron}"
 
     def test_has_workflow_dispatch(self, workflow: dict):
         """应支持手动触发"""

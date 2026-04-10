@@ -86,10 +86,10 @@ class TestSettingsConfig:
         """bot 区块必须包含关键字段"""
         bot = settings_config["bot"]
         required = {
-            "check_interval_hours",
             "max_new_comments_per_run",
             "max_new_comments_per_day",
             "llm_budget_usd_per_day",
+            "reply_prefix",
         }
         missing = required - set(bot.keys())
         assert not missing, f"bot 区块缺少字段: {missing}"
@@ -136,9 +136,9 @@ class TestSettingsConfig:
         assert not missing, f"alerting 区块缺少字段: {missing}"
 
     def test_review_section_fields(self, settings_config: dict):
-        """review 区块必须包含 manual_mode 字段"""
+        """review 区块必须包含 auto_skip_patterns 字段"""
         review = settings_config["review"]
-        assert "manual_mode" in review, "review 区块缺少 manual_mode 字段"
+        assert "auto_skip_patterns" in review, "review 区块缺少 auto_skip_patterns 字段"
 
     def test_bot_limits_are_positive(self, settings_config: dict):
         """bot 区块的限制值必须为正数"""

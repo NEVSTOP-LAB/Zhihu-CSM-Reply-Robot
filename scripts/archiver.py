@@ -19,6 +19,17 @@ import frontmatter
 logger = logging.getLogger(__name__)
 
 
+def _map_object_type(object_type: str) -> str:
+    """将配置中的 object_type 映射为知乎 API 接受的类型
+
+    ZhihuClient.post_comment() 约定使用 article/answer；
+    配置中的 question 在发布前映射为 answer。
+    """
+    if object_type == "question":
+        return "answer"
+    return object_type
+
+
 def list_pending(pending_dir: str) -> list[Path]:
     """
     列出 pending/ 目录下所有待审核文件
@@ -64,7 +75,9 @@ def approve_pending(filepath: Path, zhihu_client=None) -> bool:
 
             success = zhihu_client.post_comment(
                 meta.get("article_id", ""),
-                "article",
+                # 从 pending 元数据中读取 object_type；
+                # question 在发布时映射为 answer
+                _map_object_type(meta.get("object_type", "article")),
                 reply_text,
                 parent_id=meta.get("comment_id"),
             )

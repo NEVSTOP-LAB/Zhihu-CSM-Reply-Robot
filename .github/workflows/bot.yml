@@ -3,7 +3,7 @@
 # 参考文档：docs/调研/02-GitHub-Actions自动化.md
 #
 # 触发条件：
-#   - 每6小时定时执行（UTC 02:00, 08:00, 14:00, 20:00）
+#   - 每15分钟定时执行
 #   - 支持手动触发（workflow_dispatch）
 #
 # 所需 Secrets：
@@ -11,15 +11,13 @@
 #   - LLM_API_KEY: DeepSeek/OpenAI API Key
 #   - LLM_BASE_URL: LLM API 端点（可选，默认 DeepSeek）
 #   - LLM_MODEL: 模型名称（可选，默认 deepseek-chat）
-#   - ZHIHU_AUTO_POST: 是否直接发布（true/false，默认 false，即 pending/ 模式）
 
 name: Zhihu CSM Reply Bot
 
 on:
   schedule:
-    # 每6小时运行一次（UTC 时间）
-    # 对应北京时间 10:00, 16:00, 22:00, 04:00
-    - cron: '0 2,8,14,20 * * *'
+    # 每15分钟运行一次
+    - cron: '*/15 * * * *'
   workflow_dispatch:
     # 支持手动触发，方便测试和调试
 
@@ -89,7 +87,6 @@ jobs:
           LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
           LLM_MODEL: ${{ secrets.LLM_MODEL }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ZHIHU_AUTO_POST: ${{ secrets.ZHIHU_AUTO_POST }}
         run: python scripts/run_bot.py
 
       # 8. 提交变更（归档文件、seen_ids 等）

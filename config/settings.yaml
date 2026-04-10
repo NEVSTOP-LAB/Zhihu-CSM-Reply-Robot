@@ -4,10 +4,10 @@
 # 所有运行参数统一在此文件管理，articles.yaml 仅维护监控列表
 
 bot:
-  check_interval_hours: 6           # 检查间隔（与 cron 表达式对应）
   max_new_comments_per_run: 20      # 每次最多处理条数，防止异常
   max_new_comments_per_day: 100     # 每日上限（防止费用/风控异常）
   llm_budget_usd_per_day: 0.50     # 每日 LLM 费用预算上限，超出进 pending/
+  reply_prefix: "[rob]"             # 回复前缀，标识自动回复
 
 llm:
   base_url: "https://api.deepseek.com"   # DeepSeek API 端点（OpenAI 兼容）
@@ -30,7 +30,6 @@ vector_store:
   rebuild_interval_days: 30   # 定期重建向量库周期
 
 review:
-  manual_mode: true           # 默认 true（pending/ 模式）；验证通过后可改 false
   auto_skip_patterns:         # 跳过纯感谢类评论（正则表达式）
     - "^谢谢[！!]?$"
     - "^感谢[！!]?$"

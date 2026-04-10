@@ -132,7 +132,11 @@ class CommentFilter:
         """
         content = comment.get("content", "")
         author = comment.get("author", "")
-        timestamp = current_time or comment.get("created_time", time.time())
+        timestamp = (
+            current_time
+            if current_time is not None
+            else comment.get("created_time", time.time())
+        )
 
         # 1. 广告/敏感词检查
         for keyword in self.spam_keywords:

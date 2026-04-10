@@ -22,9 +22,8 @@ from __future__ import annotations
 import json
 import logging
 import os
-import subprocess
 import sys
-from datetime import datetime, date
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -156,12 +155,40 @@ class BotRunner:
         logger.info("所有模块初始化完成")
 
     def load_seen_ids(self):
-        """加载已处理的评论 ID 集合"""
+        """加载已处理的评论 ID 集合，支持结构校验和迁移"""
+        self._seen_ids = set()
+
         if self._seen_ids_path.exists():
+            needs_migration = False
             with open(self._seen_ids_path, "r", encoding="utf-8") as f:
-                self._seen_ids = set(json.load(f))
-        else:
-            self._seen_ids = set()
+                data = json.load(f)
+
+            if isinstance(data, list):
+                self._seen_ids = {
+                    item for item in data if isinstance(item, str)
+                }
+            elif isinstance(data, dict) and isinstance(data.get("seen_ids"), list):
+                self._seen_ids = {
+                    item for item in data["seen_ids"] if isinstance(item, str)
+                }
+                needs_migration = True
+            elif isinstance(data, dict):
+                # 旧格式 dict（如 {"articles": {}, "last_run": ...}），忽略并重置
+                logger.warning(
+                    "seen_ids 文件格式无效，已重置为空: %s",
+                    self._seen_ids_path,
+                )
+                needs_migration = True
+            else:
+                logger.warning(
+                    "seen_ids 文件格式无效，已重置为空: %s",
+                    self._seen_ids_path,
+                )
+
+            if needs_migration:
+                self.save_seen_ids()
+                logger.info("已将 seen_ids 文件迁移为标准列表格式: %s", self._seen_ids_path)
+
         logger.info(f"已加载 {len(self._seen_ids)} 个已处理评论 ID")
 
     def save_seen_ids(self):
@@ -190,6 +217,7 @@ class BotRunner:
         comment_content: str,
         reply_content: str,
         comment_id: str,
+        risk_reason: str = "",
     ):
         """将待审核回复写入 pending/ 目录
 
@@ -198,6 +226,7 @@ class BotRunner:
             comment_content: 原始评论
             reply_content: 生成的回复
             comment_id: 评论 ID
+            risk_reason: AI 风险评估理由
         """
         pending_dir = self.root / "pending"
         pending_dir.mkdir(parents=True, exist_ok=True)
@@ -205,13 +234,17 @@ class BotRunner:
         filename = f"{article['id']}_{comment_id}.md"
         filepath = pending_dir / filename
 
+        object_type = article.get("type", "article")
+
         content = (
             f"---\n"
             f"article_id: \"{article['id']}\"\n"
             f"article_title: \"{article.get('title', '')}\"\n"
+            f"object_type: \"{object_type}\"\n"
             f"comment_id: \"{comment_id}\"\n"
             f"generated_at: \"{datetime.now().strftime('%Y-%m-%dT%H:%M:%S')}\"\n"
             f"status: pending\n"
+            f"risk_reason: \"{risk_reason}\"\n"
             f"---\n\n"
             f"## 原始评论\n\n"
             f"> {comment_content}\n\n"
@@ -392,6 +425,12 @@ class BotRunner:
         reply_content = ""
         total_tokens = 0
         if self.llm_client:
+            # 记录调用前的累计值，用于计算增量
+            prev_prompt = self.llm_client.total_prompt_tokens
+            prev_completion = self.llm_client.total_completion_tokens
+            prev_cache = self.llm_client.total_cache_hit_tokens
+            prev_cost = self.llm_client.total_cost_usd
+
             reply_content, total_tokens = self.llm_client.generate_reply(
                 comment=comment_dict["content"],
                 context_chunks=context_chunks,
@@ -399,14 +438,19 @@ class BotRunner:
                 history_messages=history_messages[:-1] if history_messages else None,
             )
 
-            # 记录费用
+            # 添加 [rob]: 回复前缀
+            reply_prefix = self.settings.get("bot", {}).get("reply_prefix", "[rob]")
+            if reply_content and reply_prefix:
+                reply_content = f"{reply_prefix}: {reply_content}"
+
+            # 记录增量费用（而非累计值）
             if self.cost_tracker:
                 self.cost_tracker.record(
                     model=self.llm_client.model,
-                    prompt_tokens=self.llm_client.total_prompt_tokens,
-                    completion_tokens=self.llm_client.total_completion_tokens,
-                    cache_hit_tokens=self.llm_client.total_cache_hit_tokens,
-                    usd_cost=self.llm_client.total_cost_usd,
+                    prompt_tokens=self.llm_client.total_prompt_tokens - prev_prompt,
+                    completion_tokens=self.llm_client.total_completion_tokens - prev_completion,
+                    cache_hit_tokens=self.llm_client.total_cache_hit_tokens - prev_cache,
+                    usd_cost=self.llm_client.total_cost_usd - prev_cost,
                 )
 
         # 追加 Bot 回复到线程
@@ -427,36 +471,52 @@ class BotRunner:
                 tokens=total_tokens,
             )
 
-        # 写入 pending/
-        # 参考 AI-009 任务 3: 写入 pending/ 人工审核
-        review_cfg = self.settings.get("review", {})
-        manual_mode = review_cfg.get("manual_mode", True)
-        auto_post = os.environ.get("ZHIHU_AUTO_POST", "").lower() == "true"
+        # AI 风险评估：决定自动发布或写入 pending/
+        if self.llm_client and reply_content and self.zhihu_client:
+            risk_level, risk_reason = self.llm_client.assess_risk(
+                comment=comment_dict["content"],
+                reply=reply_content,
+            )
 
-        if manual_mode and not auto_post:
-            # MVP 模式：写入 pending/
+            if risk_level == "safe":
+                # CSM/LabVIEW 相关明确回复 → 自动发布
+                object_type = article.get("type", "article")
+                # ZhihuClient.post_comment() 约定 article/answer；
+                # 配置中的 question 在发布前映射为 answer
+                post_type = "answer" if object_type == "question" else object_type
+
+                success = self.zhihu_client.post_comment(
+                    object_id=article["id"],
+                    object_type=post_type,
+                    content=reply_content,
+                    parent_id=comment.id,
+                )
+                if not success:
+                    # 发布失败，回退到 pending/
+                    self._write_pending(
+                        article=article,
+                        comment_content=comment.content,
+                        reply_content=reply_content,
+                        comment_id=comment.id,
+                        risk_reason="发布失败，自动转入人工审核",
+                    )
+            else:
+                # 高危回复 → 写入 pending/ 等待人工审核
+                self._write_pending(
+                    article=article,
+                    comment_content=comment.content,
+                    reply_content=reply_content,
+                    comment_id=comment.id,
+                    risk_reason=risk_reason,
+                )
+        elif reply_content:
+            # 无 zhihu_client（如测试环境）→ 写入 pending/
             self._write_pending(
                 article=article,
                 comment_content=comment.content,
                 reply_content=reply_content,
                 comment_id=comment.id,
             )
-        elif auto_post and self.zhihu_client:
-            # 自动发布模式（AI-014）
-            success = self.zhihu_client.post_comment(
-                object_id=article["id"],
-                object_type=article.get("type", "article"),
-                content=reply_content,
-                parent_id=comment.id,
-            )
-            if not success:
-                # 发布失败，回退到 pending/
-                self._write_pending(
-                    article=article,
-                    comment_content=comment.content,
-                    reply_content=reply_content,
-                    comment_id=comment.id,
-                )
 
         self._seen_ids.add(comment.id)
         self._processed_count += 1
@@ -511,13 +571,63 @@ class BotRunner:
                 thread_id=comment.parent_id or comment.id,
             )
 
+    def _expand_articles(self) -> list[dict]:
+        """展开 column/user_answers 类型为具体的文章/回答列表
+
+        将 articles 配置中的 column 和 user_answers 类型自动展开
+        为对应的 article/question 类型条目。
+
+        Returns:
+            展开后的文章列表
+        """
+        expanded = []
+        for article in self.articles:
+            article_type = article.get("type", "article")
+
+            if article_type in ("article", "question"):
+                expanded.append(article)
+            elif article_type == "column" and self.zhihu_client:
+                # 展开专栏：获取专栏下全部文章
+                try:
+                    column_articles = self.zhihu_client.get_column_articles(
+                        article["id"]
+                    )
+                    expanded.extend(column_articles)
+                    logger.info(
+                        "专栏 %s 展开为 %d 篇文章",
+                        article["id"], len(column_articles),
+                    )
+                except Exception as e:
+                    logger.warning("展开专栏 %s 失败: %s", article["id"], e)
+            elif article_type == "user_answers" and self.zhihu_client:
+                # 展开用户回答：获取某人全部回答
+                try:
+                    user_answers = self.zhihu_client.get_user_answers(
+                        article["id"]
+                    )
+                    expanded.extend(user_answers)
+                    logger.info(
+                        "用户 %s 展开为 %d 个回答",
+                        article["id"], len(user_answers),
+                    )
+                except Exception as e:
+                    logger.warning("展开用户 %s 回答失败: %s", article["id"], e)
+            else:
+                expanded.append(article)
+
+        return expanded
+
     def run_articles(self):
         """处理所有文章（可单独调用，便于测试）
 
-        遍历 articles 列表，逐篇处理评论。
+        先展开 column/user_answers 类型，再逐篇处理评论。
         捕获认证/限流/预算异常并触发告警。
         """
-        for article in self.articles:
+        # 展开 column/user_answers 为具体的文章/回答
+        articles_to_process = self._expand_articles()
+        logger.info("展开后共 %d 个监控目标", len(articles_to_process))
+
+        for article in articles_to_process:
             if not self._check_daily_limit():
                 break
 

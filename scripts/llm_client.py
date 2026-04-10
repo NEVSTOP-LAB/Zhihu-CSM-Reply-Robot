@@ -261,6 +261,68 @@ class LLMClient:
         logger.info("生成文章摘要: %s（%d字）", title, len(summary))
         return summary
 
+    def assess_risk(self, comment: str, reply: str) -> tuple[str, str]:
+        """
+        AI 风险评估：判断回复是否可以自动发布
+
+        根据评论内容和生成的回复，判断是否需要人工审核。
+        CSM/LabVIEW 相关的明确回复可直接发布；
+        敏感话题、超出知识库范围的回复需人工介入。
+
+        Args:
+            comment: 用户评论内容
+            reply: LLM 生成的回复内容
+
+        Returns:
+            (risk_level, reason):
+            - risk_level: "safe"（可自动发布）或 "risky"（需人工审核）
+            - reason: 判断理由
+        """
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你是风险评估助手。判断一条自动生成的知乎评论回复是否可以直接发布。\n"
+                    "判断规则：\n"
+                    "1. 如果回复是关于 CSM（客户成功管理）、LabVIEW、NI、JKISM/CSM框架 "
+                    "等技术话题的正常回答，回复 SAFE\n"
+                    "2. 如果回复涉及以下情况，回复 RISKY：\n"
+                    "   - 政治、宗教等敏感话题\n"
+                    "   - 回复内容超出知识库范围，可能不准确\n"
+                    "   - 用户的问题需要专业人工判断\n"
+                    "   - 回复包含具体承诺或商业建议\n"
+                    "   - 回复语气不当或可能引起争议\n"
+                    "只需回复一个词：SAFE 或 RISKY，然后换行给出简短理由。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"用户评论：{comment}\n\n生成的回复：{reply}",
+            },
+        ]
+
+        try:
+            response = self._call_with_retry(messages, max_tokens=50)
+            result = (response.choices[0].message.content or "").strip()
+            self._track_cost(response.usage)
+
+            # 解析结果
+            lines = result.split("\n", 1)
+            level = lines[0].strip().upper()
+            reason = lines[1].strip() if len(lines) > 1 else ""
+
+            if "SAFE" in level:
+                logger.info("风险评估: SAFE - %s", reason)
+                return "safe", reason
+            else:
+                logger.info("风险评估: RISKY - %s", reason)
+                return "risky", reason
+
+        except Exception as e:
+            # 评估失败时保守处理，标记为 risky
+            logger.warning("风险评估异常，默认标记为 risky: %s", e)
+            return "risky", f"评估异常: {e}"
+
     def _call_with_retry(
         self,
         messages: list[dict],

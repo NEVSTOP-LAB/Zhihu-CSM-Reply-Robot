@@ -39,10 +39,10 @@ def bot_root(tmp_path: Path) -> Path:
 
     settings = {
         "bot": {
-            "check_interval_hours": 6,
             "max_new_comments_per_run": 20,
             "max_new_comments_per_day": 100,
             "llm_budget_usd_per_day": 0.50,
+            "reply_prefix": "[rob]",
         },
         "llm": {
             "base_url": "https://api.deepseek.com",
@@ -58,7 +58,7 @@ def bot_root(tmp_path: Path) -> Path:
             "history_turns": 6,
         },
         "vector_store": {"backend": "actions_cache", "max_size_mb": 500},
-        "review": {"manual_mode": True},
+        "review": {"auto_skip_patterns": []},
         "filter": {
             "max_comment_tokens": 500,
             "spam_keywords": ["加微信"],
@@ -186,7 +186,7 @@ class TestProcessArticle:
         runner.llm_client.generate_reply.assert_not_called()
 
     def test_new_comment_generates_reply(self, runner, bot_root):
-        """新评论应生成回复并写入 pending/"""
+        """新评论应生成回复并写入 pending/（高危时）"""
         runner.load_config()
         runner.init_modules()
 
@@ -199,6 +199,8 @@ class TestProcessArticle:
         runner.llm_client.generate_reply.return_value = (
             "CSM 是客户成功管理的缩写。", 150
         )
+        # AI 风险评估：高危 → 写入 pending/
+        runner.llm_client.assess_risk.return_value = ("risky", "需人工确认")
         runner.llm_client.total_cost_usd = 0.001
         runner.llm_client.total_prompt_tokens = 100
         runner.llm_client.total_completion_tokens = 50
@@ -214,6 +216,13 @@ class TestProcessArticle:
         # 验证回复被写入 pending/
         pending_files = list((bot_root / "pending").glob("*.md"))
         assert len(pending_files) >= 1
+
+        # 验证 pending 文件包含 object_type 元数据
+        content = pending_files[0].read_text()
+        assert "object_type" in content
+
+        # 验证 [rob]: 前缀被添加
+        assert "[rob]:" in content
 
         # 验证 seen_ids 更新
         assert "new_1" in runner._seen_ids
@@ -373,3 +382,293 @@ class TestWritePending:
         runner._write_pending(article, "评论", "回复", "BBB")
 
         assert (bot_root / "pending" / "AAA_BBB.md").exists()
+
+
+# ===== AI 风险评估与自动发布测试 =====
+
+class TestRiskAssessment:
+    """验证 AI 风险评估决定自动发布或写入 pending/"""
+
+    def test_safe_reply_auto_published(self, runner, bot_root):
+        """AI 判定安全的回复应自动发布"""
+        runner.load_config()
+        runner.init_modules()
+
+        runner.zhihu_client = MagicMock()
+        runner.zhihu_client.get_comments.return_value = [
+            _make_comment("auto_1", "CSM 框架怎么用？"),
+        ]
+        runner.zhihu_client.post_comment.return_value = True
+
+        runner.llm_client = MagicMock()
+        runner.llm_client.generate_reply.return_value = (
+            "CSM 框架使用说明...", 100
+        )
+        # AI 风险评估：安全 → 自动发布
+        runner.llm_client.assess_risk.return_value = ("safe", "CSM 技术问题")
+        runner.llm_client.total_cost_usd = 0.001
+        runner.llm_client.total_prompt_tokens = 80
+        runner.llm_client.total_completion_tokens = 40
+        runner.llm_client.total_cache_hit_tokens = 0
+        runner.llm_client.model = "deepseek-chat"
+        runner.llm_client.summarize_article.return_value = "摘要"
+
+        runner.rag_retriever = MagicMock()
+        runner.rag_retriever.retrieve.return_value = []
+
+        runner.process_article(runner.articles[0])
+
+        # 验证自动发布被调用
+        runner.zhihu_client.post_comment.assert_called_once()
+        # 不应有 pending 文件
+        pending_files = list((bot_root / "pending").glob("*.md"))
+        assert len(pending_files) == 0
+
+    def test_risky_reply_goes_to_pending(self, runner, bot_root):
+        """AI 判定高危的回复应写入 pending/"""
+        runner.load_config()
+        runner.init_modules()
+
+        runner.zhihu_client = MagicMock()
+        runner.zhihu_client.get_comments.return_value = [
+            _make_comment("risky_1", "公司财务怎么处理？"),
+        ]
+
+        runner.llm_client = MagicMock()
+        runner.llm_client.generate_reply.return_value = (
+            "建议咨询专业人士...", 100
+        )
+        runner.llm_client.assess_risk.return_value = ("risky", "超出知识库范围")
+        runner.llm_client.total_cost_usd = 0.001
+        runner.llm_client.total_prompt_tokens = 80
+        runner.llm_client.total_completion_tokens = 40
+        runner.llm_client.total_cache_hit_tokens = 0
+        runner.llm_client.model = "deepseek-chat"
+        runner.llm_client.summarize_article.return_value = "摘要"
+
+        runner.rag_retriever = MagicMock()
+        runner.rag_retriever.retrieve.return_value = []
+
+        runner.process_article(runner.articles[0])
+
+        # 不应自动发布
+        runner.zhihu_client.post_comment.assert_not_called()
+        # 应写入 pending/
+        pending_files = list((bot_root / "pending").glob("*.md"))
+        assert len(pending_files) == 1
+        content = pending_files[0].read_text()
+        assert "risk_reason" in content
+
+    def test_publish_failure_falls_back_to_pending(self, runner, bot_root):
+        """自动发布失败应回退到 pending/"""
+        runner.load_config()
+        runner.init_modules()
+
+        runner.zhihu_client = MagicMock()
+        runner.zhihu_client.get_comments.return_value = [
+            _make_comment("fail_1", "CSM 问题"),
+        ]
+        runner.zhihu_client.post_comment.return_value = False  # 发布失败
+
+        runner.llm_client = MagicMock()
+        runner.llm_client.generate_reply.return_value = ("回复内容", 100)
+        runner.llm_client.assess_risk.return_value = ("safe", "CSM 话题")
+        runner.llm_client.total_cost_usd = 0.001
+        runner.llm_client.total_prompt_tokens = 80
+        runner.llm_client.total_completion_tokens = 40
+        runner.llm_client.total_cache_hit_tokens = 0
+        runner.llm_client.model = "deepseek-chat"
+        runner.llm_client.summarize_article.return_value = "摘要"
+
+        runner.rag_retriever = MagicMock()
+        runner.rag_retriever.retrieve.return_value = []
+
+        runner.process_article(runner.articles[0])
+
+        # 发布被调用但失败，应回退到 pending
+        runner.zhihu_client.post_comment.assert_called_once()
+        pending_files = list((bot_root / "pending").glob("*.md"))
+        assert len(pending_files) == 1
+
+
+# ===== [rob]: 回复前缀测试 =====
+
+class TestReplyPrefix:
+    """验证回复前缀功能"""
+
+    def test_reply_prefix_added(self, runner, bot_root):
+        """回复应包含 [rob]: 前缀"""
+        runner.load_config()
+        runner.init_modules()
+
+        runner.zhihu_client = MagicMock()
+        runner.zhihu_client.get_comments.return_value = [
+            _make_comment("prefix_1", "测试"),
+        ]
+        runner.zhihu_client.post_comment.return_value = True
+
+        runner.llm_client = MagicMock()
+        runner.llm_client.generate_reply.return_value = ("原始回复", 50)
+        runner.llm_client.assess_risk.return_value = ("safe", "安全")
+        runner.llm_client.total_cost_usd = 0.0
+        runner.llm_client.total_prompt_tokens = 0
+        runner.llm_client.total_completion_tokens = 0
+        runner.llm_client.total_cache_hit_tokens = 0
+        runner.llm_client.model = "deepseek-chat"
+        runner.llm_client.summarize_article.return_value = ""
+
+        runner.rag_retriever = MagicMock()
+        runner.rag_retriever.retrieve.return_value = []
+
+        runner.process_article(runner.articles[0])
+
+        # 验证发布的内容包含 [rob]: 前缀
+        call_args = runner.zhihu_client.post_comment.call_args
+        posted_content = call_args.kwargs.get("content", call_args[0][2] if len(call_args[0]) > 2 else "")
+        assert posted_content.startswith("[rob]:")
+
+
+# ===== seen_ids 迁移测试 =====
+
+class TestSeenIdsMigration:
+    """验证 seen_ids 格式校验和迁移"""
+
+    def test_load_dict_format_resets(self, runner, bot_root):
+        """旧 dict 格式应被重置为空并迁移"""
+        seen_path = bot_root / "data" / "seen_ids.json"
+        seen_path.write_text('{"articles": {}, "last_run": null}')
+
+        runner.load_config()
+        runner.load_seen_ids()
+
+        # 旧 dict 格式应被重置
+        assert runner._seen_ids == set()
+        # 文件应已被迁移为 list 格式
+        import json
+        with open(seen_path) as f:
+            data = json.load(f)
+        assert isinstance(data, list)
+
+    def test_load_dict_with_seen_ids_key(self, runner, bot_root):
+        """dict 包含 seen_ids key 时应正确迁移"""
+        seen_path = bot_root / "data" / "seen_ids.json"
+        seen_path.write_text('{"seen_ids": ["a", "b"]}')
+
+        runner.load_config()
+        runner.load_seen_ids()
+
+        assert runner._seen_ids == {"a", "b"}
+
+
+# ===== 文章类型展开测试 =====
+
+class TestExpandArticles:
+    """验证 column/user_answers 类型展开"""
+
+    def test_article_and_question_pass_through(self, runner):
+        """article/question 类型应直接传递"""
+        runner.load_config()
+        runner.init_modules()
+        runner.zhihu_client = MagicMock()
+
+        runner.articles = [
+            {"id": "1", "type": "article"},
+            {"id": "2", "type": "question"},
+        ]
+        result = runner._expand_articles()
+        assert len(result) == 2
+        assert result[0]["type"] == "article"
+        assert result[1]["type"] == "question"
+
+    def test_column_expands_to_articles(self, runner):
+        """column 类型应展开为文章列表"""
+        runner.load_config()
+        runner.init_modules()
+        runner.zhihu_client = MagicMock()
+        runner.zhihu_client.get_column_articles.return_value = [
+            {"id": "10", "title": "文章1", "url": "url1", "type": "article"},
+            {"id": "11", "title": "文章2", "url": "url2", "type": "article"},
+        ]
+
+        runner.articles = [
+            {"id": "my-column", "type": "column"},
+        ]
+        result = runner._expand_articles()
+        assert len(result) == 2
+        assert all(a["type"] == "article" for a in result)
+
+    def test_user_answers_expands(self, runner):
+        """user_answers 类型应展开为回答列表"""
+        runner.load_config()
+        runner.init_modules()
+        runner.zhihu_client = MagicMock()
+        runner.zhihu_client.get_user_answers.return_value = [
+            {"id": "20", "title": "回答1", "url": "url1", "type": "question"},
+        ]
+
+        runner.articles = [
+            {"id": "some-user", "type": "user_answers"},
+        ]
+        result = runner._expand_articles()
+        assert len(result) == 1
+        assert result[0]["type"] == "question"
+
+    def test_column_expand_failure_skips(self, runner):
+        """展开失败时应跳过该条目"""
+        runner.load_config()
+        runner.init_modules()
+        runner.zhihu_client = MagicMock()
+        runner.zhihu_client.get_column_articles.side_effect = Exception("网络错误")
+
+        runner.articles = [
+            {"id": "1", "type": "article"},
+            {"id": "fail-column", "type": "column"},
+        ]
+        result = runner._expand_articles()
+        # 仅保留 article 类型
+        assert len(result) == 1
+        assert result[0]["id"] == "1"
+
+
+# ===== post_comment 类型映射测试 =====
+
+class TestTypeMapping:
+    """验证 question→answer 类型映射"""
+
+    def test_question_mapped_to_answer_on_publish(self, runner):
+        """自动发布时 question 应映射为 answer"""
+        runner.load_config()
+        runner.init_modules()
+
+        runner.zhihu_client = MagicMock()
+        runner.zhihu_client.get_comments.return_value = [
+            _make_comment("map_1", "LabVIEW 问题"),
+        ]
+        runner.zhihu_client.post_comment.return_value = True
+
+        runner.llm_client = MagicMock()
+        runner.llm_client.generate_reply.return_value = ("回复", 50)
+        runner.llm_client.assess_risk.return_value = ("safe", "安全")
+        runner.llm_client.total_cost_usd = 0.0
+        runner.llm_client.total_prompt_tokens = 0
+        runner.llm_client.total_completion_tokens = 0
+        runner.llm_client.total_cache_hit_tokens = 0
+        runner.llm_client.model = "deepseek-chat"
+        runner.llm_client.summarize_article.return_value = ""
+
+        runner.rag_retriever = MagicMock()
+        runner.rag_retriever.retrieve.return_value = []
+
+        # 使用 question 类型的文章
+        runner.articles = [{
+            "id": "999",
+            "title": "知乎问题",
+            "url": "https://example.com",
+            "type": "question",
+        }]
+
+        runner.process_article(runner.articles[0])
+
+        # 验证 post_comment 使用 "answer" 而非 "question"
+        call_args = runner.zhihu_client.post_comment.call_args
+        assert call_args.kwargs.get("object_type") == "answer"

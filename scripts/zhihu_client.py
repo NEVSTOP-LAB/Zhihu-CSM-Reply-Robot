@@ -204,6 +204,9 @@ class ZhihuClient:
                         "HTTP 429 限流，第 %d/%d 次重试，等待 %.1f 秒",
                         attempt + 1, self.max_retries, wait
                     )
+                    last_exception = ZhihuRateLimitError(
+                        f"HTTP 429 限流（第 {attempt + 1} 次）"
+                    )
                     time.sleep(wait)
                     continue
 
@@ -282,9 +285,22 @@ class ZhihuClient:
 
             offset += self.PAGE_LIMIT
 
-        # 按 since_id 过滤（若提供）
+        # 按 since_id 过滤（若提供），使用数值比较而非字典序
         if since_id is not None:
-            all_comments = [c for c in all_comments if c.id > since_id]
+            try:
+                since_id_int = int(since_id)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("since_id must be a numeric comment ID") from exc
+
+            filtered_comments: list[Comment] = []
+            for c in all_comments:
+                try:
+                    comment_id_int = int(c.id)
+                except (TypeError, ValueError):
+                    continue
+                if comment_id_int > since_id_int:
+                    filtered_comments.append(c)
+            all_comments = filtered_comments
 
         logger.info(
             "获取 %s/%s 评论 %d 条",
@@ -381,3 +397,89 @@ class ZhihuClient:
         except Exception as e:
             logger.error("评论发布异常: %s", e)
             return False
+
+    def get_column_articles(self, column_id: str) -> list[dict]:
+        """
+        获取专栏下所有文章列表
+
+        用于展开 type="column" 的监控目标，自动获取专栏内全部文章。
+
+        Args:
+            column_id: 专栏 ID（如 "csm-practice"）
+
+        Returns:
+            文章字典列表，每项含 id/title/url/type
+        """
+        url = f"{self.API_READ_BASE}/columns/{column_id}/articles"
+        all_articles: list[dict] = []
+        offset = 0
+
+        while True:
+            params = {"limit": self.PAGE_LIMIT, "offset": offset}
+            delay = random.uniform(self.REQUEST_DELAY_MIN, self.REQUEST_DELAY_MAX)
+            time.sleep(delay)
+
+            logger.debug("请求专栏文章: %s offset=%d", url, offset)
+            response = self._request_with_retry("GET", url, params=params)
+            data = response.json()
+
+            items = data.get("data", [])
+            for item in items:
+                all_articles.append({
+                    "id": str(item.get("id", "")),
+                    "title": item.get("title", ""),
+                    "url": item.get("url", f"https://zhuanlan.zhihu.com/p/{item.get('id', '')}"),
+                    "type": "article",
+                })
+
+            paging = data.get("paging", {})
+            if paging.get("is_end", True):
+                break
+            offset += self.PAGE_LIMIT
+
+        logger.info("专栏 %s 获取到 %d 篇文章", column_id, len(all_articles))
+        return all_articles
+
+    def get_user_answers(self, user_id: str) -> list[dict]:
+        """
+        获取某用户的全部回答列表
+
+        用于展开 type="user_answers" 的监控目标。
+
+        Args:
+            user_id: 用户 URL ID（如 "nevstop"）
+
+        Returns:
+            回答字典列表，每项含 id/title/url/type
+        """
+        url = f"{self.API_READ_BASE}/members/{user_id}/answers"
+        all_answers: list[dict] = []
+        offset = 0
+
+        while True:
+            params = {"limit": self.PAGE_LIMIT, "offset": offset}
+            delay = random.uniform(self.REQUEST_DELAY_MIN, self.REQUEST_DELAY_MAX)
+            time.sleep(delay)
+
+            logger.debug("请求用户回答: %s offset=%d", url, offset)
+            response = self._request_with_retry("GET", url, params=params)
+            data = response.json()
+
+            items = data.get("data", [])
+            for item in items:
+                answer_id = str(item.get("id", ""))
+                question = item.get("question", {})
+                all_answers.append({
+                    "id": answer_id,
+                    "title": question.get("title", item.get("excerpt", "")),
+                    "url": f"https://www.zhihu.com/question/{question.get('id', '')}/answer/{answer_id}",
+                    "type": "question",
+                })
+
+            paging = data.get("paging", {})
+            if paging.get("is_end", True):
+                break
+            offset += self.PAGE_LIMIT
+
+        logger.info("用户 %s 获取到 %d 个回答", user_id, len(all_answers))
+        return all_answers
