@@ -29,7 +29,7 @@
 
 ```mermaid
 flowchart TD
-    A([GitHub Actions 定时触发\n每6小时]) --> B[拉取最新代码\n加载 seen_ids.json]
+    A([GitHub Actions 定时触发\n每15分钟]) --> B[拉取最新代码\n加载 seen_ids.json]
     B --> PRE{日处理量\n是否超限?}
     PRE -- 是 --> ALERT1[创建 GitHub Issue 告警\n当日已达上限]
     ALERT1 --> Z
@@ -56,18 +56,19 @@ flowchart TD
     K --> L
     L --> M[组装 Prompt\nSystem: 角色+规则+Wiki\nHistory: 历史轮次\nUser: 当前评论]
     M --> N[调用 DeepSeek-V3 API\nmax_tokens=250]
-    N --> O{Cookie+CSRF\n评论发布是否可用?}
-    O -- 否（验证失败或降级） --> P[写入 pending/\n等待人工确认]
-    O -- 是 --> Q[调用知乎 API\nPOST /comments\nCookie + _xsrf CSRF]
+    N --> O{AI 风险评估\nSAFE / RISKY?}
+    O -- RISKY（高风险） --> P[写入 pending/\n等待人工确认]
+    O -- SAFE --> Q[调用知乎 API\nPOST /comments\nCookie + _xsrf CSRF]
     Q --> QERR{发布结果}
     QERR -- 失败 --> P
-    QERR -- 成功 --> R
-    P --> R[追加到 thread.md\n更新 seen_ids.json]
-    R --> S[真人是否有新回复?]
-    S -- 是 --> T[写入 thread.md ⭐\n索引到 reply_index]
-    S -- 否 --> U
-    T --> U[git add + commit\n推送归档 skip-ci]
-    U --> Z
+    QERR -- 成功 --> R[索引回复到 RAG\n写入 reply_index]
+    R --> S[追加到 thread.md\n更新 seen_ids.json]
+    P --> S
+    S --> T[真人是否有新回复?]
+    T -- 是 --> U[写入 thread.md ⭐\n索引到 reply_index]
+    T -- 否 --> V
+    U --> V[git add + commit\n推送归档 skip-ci]
+    V --> Z
 ```
 
 ---
@@ -110,7 +111,7 @@ flowchart LR
 ```
 Zhihu-CSM-Reply-Robot/
 ├── .github/workflows/
-│   ├── bot.yml              # 主 workflow：每6小时检查回复
+│   ├── bot.yml              # 主 workflow：每15分钟检查回复
 │   └── sync-wiki.yml        # 每周同步 CSM Wiki
 ├── config/
 │   ├── articles.yaml        # 监控的知乎文章/问题列表
@@ -127,15 +128,17 @@ Zhihu-CSM-Reply-Robot/
 ├── data/
 │   ├── seen_ids.json
 │   ├── wiki_hash.json
+│   ├── dedup_cache.json     # dedup 缓存（跨 run 持久化）
 │   ├── vector_store/        # ChromaDB Wiki 索引
-│   └── reply_index/         # ChromaDB 历史回复索引
+│   ├── reply_index/         # ChromaDB 历史回复索引
+│   ├── pending/             # 人工审核模式：待确认回复
+│   └── done/                # 已审核通过并发布的回复
 ├── archive/
 │   └── articles/
 │       └── {article_id}/
 │           ├── meta.md
 │           └── threads/
 │               └── {thread_id}.md
-├── pending/                 # 人工审核模式：待确认回复
 ├── requirements.txt
 └── README.md
 ```
@@ -151,11 +154,11 @@ articles:
   - id: "98765432"
     title: "CSM 最佳实践系列（一）"
     url: "https://zhuanlan.zhihu.com/p/98765432"
-    type: "article"   # article | question
+    type: "article"   # article | question | column | user_answers
   - id: "123456789"
     title: "如何做好客户成功？"
     url: "https://www.zhihu.com/question/123456789"
-    type: "question"
+    type: "question"  # question 类型会自动展开为回答列表（取 answer_id 后访问 /answers/{id}/comments）
 ```
 
 > **注意**：`articles.yaml` 仅维护监控的文章/问题列表，不包含 settings 配置。所有运行参数统一在 `config/settings.yaml` 中管理。
@@ -254,28 +257,30 @@ alerting:
 - **任务**：实现 `scripts/zhihu_client.py`
   1. `ZhihuClient(cookie)` 从 `ZHIHU_COOKIE` 环境变量读取
   2. `get_comments(object_id, object_type, since_id=None) -> list[Comment]`
-     - `object_type` 支持 `"article"` 和 `"question"`（文章走 `/api/v4/articles/{id}/comments`，问题走 `/api/v4/answers/{answer_id}/comments`）
+     - `object_type` 支持 `"article"` / `"answer"` / `"question"`（`"question"` 向后兼容 `"answer"`）
      - 自动分页直到 `is_end=True`
      - 随机延迟 1~2 秒
-     - 429 指数退避最多 3 次
-  3. `post_comment(object_id, object_type, content, parent_id=None) -> bool`
+     - 429 指数退避最多 3 次；网络类异常耗尽重试后抛 `ZhihuRequestError`
+  3. `get_question_answers(question_id) -> list[dict]`：获取问题下的回答列表（返回 `type="answer"` 的 item）
+  4. `post_comment(object_id, object_type, content, parent_id=None) -> bool`
      - 调用 `POST https://api.zhihu.com/v4/comments`（与 AI-001 确认的接口端点一致）
      - 从 Cookie 中提取 `_xsrf` 值，设置 `x-xsrftoken` 请求头（参考 [zhihu-cli](https://github.com/BAIGUANGMEI/zhihu-cli) 的 CSRF 处理方式）
-     - **若 AI-001 验证 Cookie+CSRF 可用**：直接发送 POST 请求
-     - **若 AI-001 验证需要 OAuth**：记录日志并返回 False（由主流程写入 pending/）
+     - 认证失败（401/403）时重新抛出 `ZhihuAuthError`，让上层触发告警
      - 同样适用 User-Agent、Referer 请求头（与 zhihu-cli 保持一致的浏览器指纹）
-  4. `dataclass Comment`：`id, parent_id, content, author, created_time, is_author_reply`
-  5. Cookie 失效（401/403）时抛出 `ZhihuAuthError`
+  5. `dataclass Comment`：`id, parent_id, content, author, created_time, is_author_reply`
+  6. Cookie 失效（401/403）时抛出 `ZhihuAuthError(message, status_code=401/403)`（携带 status_code）
+  7. 网络类异常耗尽重试时抛出 `ZhihuRequestError`
 - **验收**：单元测试全部通过
 - **测试**：`tests/test_zhihu_client.py`
-  - Mock HTTP：正常分页返回、`is_end=True` 停止分页（分别测试 article 和 question）
-  - Mock HTTP 429：验证指数退避重试逻辑
-  - Mock HTTP 401：验证抛出 `ZhihuAuthError`
+  - Mock HTTP：正常分页返回、`is_end=True` 停止分页（分别测试 article 和 answer/question）
+  - Mock HTTP 429：验证指数退避重试逻辑（抛 `ZhihuRateLimitError`）
+  - Mock 网络错误：验证抛出 `ZhihuRequestError`（FIX-10）
+  - Mock HTTP 401/403：验证抛出 `ZhihuAuthError` 并携带正确 `status_code`（FIX-11）
   - 验证 `Comment` dataclass 字段映射正确
   - 验证 `post_comment` 请求目标为 `https://api.zhihu.com/v4/comments`，且包含正确的 `object_id`/`object_type` 参数
   - 验证 `post_comment` 请求头包含 `x-xsrftoken`（从 Cookie 提取）
   - Mock POST 成功（200/201）：验证返回 True
-  - Mock POST 失败（401）：验证返回 False 并记录日志
+  - Mock POST 失败（401）：验证抛出 `ZhihuAuthError`（FIX-09）
 
 ---
 
@@ -283,12 +288,14 @@ alerting:
 
 - **目标**：可运行的 workflow，含 HuggingFace 模型缓存
 - **任务**：创建 `.github/workflows/bot.yml`
-  1. 触发：`schedule cron '0 2,8,14,20 * * *'` + `workflow_dispatch`
+  1. 触发：`schedule cron '*/15 * * * *'` + `workflow_dispatch`
   2. steps：checkout → setup-python 3.11 → **actions/cache（pip + huggingface）** → pip install → `python scripts/run_bot.py` → `git config user.name` / `git config user.email` → git commit+push
   3. 所需 secrets：`ZHIHU_COOKIE`, `LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL`, `GITHUB_TOKEN`
-  4. `permissions: contents: write`
+  4. `permissions: contents: write, issues: write`
+  5. `concurrency: group: reply-bot, cancel-in-progress: false`（FIX-22：防止并发写 seen_ids）
+  6. vector_store cache key 使用 `hashFiles('csm-wiki/**')`（FIX-08：内容不变时复用缓存）
 - **验收**：workflow 可手动触发，缓存 key 命中后跳过下载；提交步骤不因缺少 git 身份配置而失败
-- **测试**：`tests/test_workflow_config.py` — 解析 yaml，验证必要字段（cron、secrets 引用、permissions）存在
+- **测试**：`tests/test_workflow_config.py` — 解析 yaml，验证必要字段（cron、secrets 引用、permissions、concurrency）存在
 
 ---
 
@@ -300,17 +307,18 @@ alerting:
 
 - **目标**：实现 CSM Wiki 增量 embedding + 检索
 - **任务**：实现 `scripts/rag_retriever.py`
-  1. 本地 BGE embedding（`BAAI/bge-small-zh-v1.5`），支持 `use_online_embedding` 开关切换为 `text-embedding-3-small`
-  2. `sync_wiki(force=False)`：MD5 比对，增量更新，按标题分块
-  3. `retrieve(query, k=3, threshold=0.72) -> list[str]`：先 reply_index top-2，再 wiki top-(k-2)
-  4. `index_human_reply(question, reply, article_id, thread_id)`：高权重写入 reply_index
+  1. 本地 BGE embedding（`BAAI/bge-small-zh-v1.5`），支持 `use_online_embedding` 开关切换为 `text-embedding-3-small`；在线 embedding 会显式 L2 归一化（FIX-07）
+  2. `sync_wiki(force=False)`：MD5 比对，增量更新，按标题分块；embedding 成功后再删旧向量（FIX-23）
+  3. `retrieve(query, k=3, threshold=0.72) -> list[str]`：先 reply_index top-2，再 wiki top-(k-2)；query 使用评论内容（FIX-02）
+  4. `index_human_reply(question, reply, article_id, thread_id)`：高权重写入 reply_index；仅在发布成功后调用（FIX-06）
   5. 向量库路径从 settings 读取（`actions_cache` 模式时路径可配置）
 - **验收**：单元测试全部通过
 - **测试**：`tests/test_rag_retriever.py`
   - 用 Mock ChromaDB，测试 `sync_wiki` 只对变更文件重新 embedding
   - 测试 `retrieve` 相似度低于阈值时返回空
   - 测试 `retrieve` 优先返回 reply_index 中高权重结果
-  - 测试 `use_online_embedding=true` 时调用正确的 embedding 接口
+  - 测试 `use_online_embedding=true` 时调用正确的 embedding 接口，且向量已 L2 归一化（FIX-07）
+  - 测试 embedding 失败时旧向量被保留（FIX-23）
 
 ---
 
@@ -322,15 +330,16 @@ alerting:
   2. `generate_reply(comment, context_chunks, article_summary, history_messages=None) -> tuple[str, int]`
      - System Prompt（角色 + 规则 + wiki_context）作为固定前缀
      - 记录 `prompt_cache_hit_tokens`
-  3. `summarize_article(title, content) -> str`（≤200 tokens，结果缓存）
-  4. 指数退避重试最多 3 次
-  5. 累计 token 费用，超 `llm_budget_usd_per_day` 时抛出 `BudgetExceededError`
+  3. `summarize_article(title, content) -> str`（≤200 tokens，结果缓存，cache_key 使用 hashlib.md5，FIX-21）
+  4. `assess_risk(comment, reply) -> (level, reason)`：开头检查预算，超限抛 `BudgetExceededError`（FIX-20）
+  5. 指数退避重试最多 3 次
+  6. 累计 token 费用，超 `llm_budget_usd_per_day` 时抛出 `BudgetExceededError`；`daily_cost` 已移除，统一使用 `total_cost_usd`（FIX-17）
 - **验收**：单元测试全部通过
 - **测试**：`tests/test_llm_client.py`
   - Mock OpenAI API：验证 System Prompt 前缀固定（缓存友好）
   - 验证 history_messages 正确拼接到 messages 列表
   - 验证重试逻辑（mock 前2次失败，第3次成功）
-  - 验证超预算时抛出 `BudgetExceededError`
+  - 验证超预算时 generate_reply 和 assess_risk 均抛出 `BudgetExceededError`（FIX-20）
   - 验证 `summarize_article` 结果被缓存（第二次调用不触发 API）
 
 ---
