@@ -879,6 +879,63 @@ class TestReplyIndexToRAG:
         reply_arg = call_args.kwargs.get("reply", call_args[1].get("reply", ""))
         assert "CSM 使用指南" in reply_arg
 
+    def test_risky_reply_not_indexed_to_rag(self, runner, bot_root):
+        """高危回复不应索引到 RAG（FIX-06）"""
+        runner.load_config()
+        runner.init_modules()
+
+        runner.zhihu_client = MagicMock()
+        runner.zhihu_client.get_comments.return_value = [
+            _make_comment("risky_rag", "敏感问题"),
+        ]
+
+        runner.llm_client = MagicMock()
+        runner.llm_client.generate_reply.return_value = ("回复内容", 100)
+        runner.llm_client.assess_risk.return_value = ("risky", "超出范围")
+        runner.llm_client.total_cost_usd = 0.0
+        runner.llm_client.total_prompt_tokens = 0
+        runner.llm_client.total_completion_tokens = 0
+        runner.llm_client.total_cache_hit_tokens = 0
+        runner.llm_client.model = "deepseek-chat"
+        runner.llm_client.summarize_article.return_value = ""
+
+        runner.rag_retriever = MagicMock()
+        runner.rag_retriever.retrieve.return_value = []
+
+        runner.process_article(runner.articles[0])
+
+        # 高危回复不应索引到 RAG
+        runner.rag_retriever.index_human_reply.assert_not_called()
+
+    def test_failed_post_not_indexed_to_rag(self, runner, bot_root):
+        """发布失败的回复不应索引到 RAG（FIX-06）"""
+        runner.load_config()
+        runner.init_modules()
+
+        runner.zhihu_client = MagicMock()
+        runner.zhihu_client.get_comments.return_value = [
+            _make_comment("fail_rag", "CSM 问题"),
+        ]
+        runner.zhihu_client.post_comment.return_value = False  # 发布失败
+
+        runner.llm_client = MagicMock()
+        runner.llm_client.generate_reply.return_value = ("回复内容", 100)
+        runner.llm_client.assess_risk.return_value = ("safe", "安全")
+        runner.llm_client.total_cost_usd = 0.0
+        runner.llm_client.total_prompt_tokens = 0
+        runner.llm_client.total_completion_tokens = 0
+        runner.llm_client.total_cache_hit_tokens = 0
+        runner.llm_client.model = "deepseek-chat"
+        runner.llm_client.summarize_article.return_value = ""
+
+        runner.rag_retriever = MagicMock()
+        runner.rag_retriever.retrieve.return_value = []
+
+        runner.process_article(runner.articles[0])
+
+        # 发布失败不应索引到 RAG
+        runner.rag_retriever.index_human_reply.assert_not_called()
+
 
 # ===== RAG 检索使用评论内容测试（FIX-02 / TEST-01）=====
 

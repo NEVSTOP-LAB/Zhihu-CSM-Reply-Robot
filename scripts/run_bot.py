@@ -480,18 +480,6 @@ class BotRunner:
                 tokens=total_tokens,
             )
 
-        # 将 QA 对（用户评论 + bot 回复）索引到 RAG，用于后续检索学习
-        if self.rag_retriever and reply_content:
-            try:
-                self.rag_retriever.index_human_reply(
-                    question=comment_dict["content"],
-                    reply=reply_content,
-                    article_id=article["id"],
-                    thread_id=comment.parent_id or comment.id if hasattr(comment, 'parent_id') else comment.id,
-                )
-            except Exception as e:
-                logger.warning("Bot 回复索引到 RAG 失败: %s", e)
-
         # AI 风险评估：决定自动发布或写入 pending/
         if self.llm_client and reply_content and self.zhihu_client:
             risk_level, risk_reason = self.llm_client.assess_risk(
@@ -512,7 +500,20 @@ class BotRunner:
                     content=reply_content,
                     parent_id=comment.id,
                 )
-                if not success:
+                if success:
+                    # 发布成功后才将 QA 对索引到 RAG（FIX-06）
+                    # 避免未发布/被拒回复污染检索结果
+                    if self.rag_retriever:
+                        try:
+                            self.rag_retriever.index_human_reply(
+                                question=comment_dict["content"],
+                                reply=reply_content,
+                                article_id=article["id"],
+                                thread_id=comment.parent_id or comment.id,
+                            )
+                        except Exception as e:
+                            logger.warning("Bot 回复索引到 RAG 失败: %s", e)
+                else:
                     # 发布失败，回退到 pending/
                     self._write_pending(
                         article=article,
