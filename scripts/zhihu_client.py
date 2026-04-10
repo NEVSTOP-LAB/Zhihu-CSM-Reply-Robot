@@ -152,7 +152,7 @@ class ZhihuClient:
 
         Args:
             object_id: 文章 ID 或回答 ID
-            object_type: "article" 或 "question"
+            object_type: "article"、"answer" 或 "question"（同 "answer"，保持向后兼容）
 
         Returns:
             完整的 API URL
@@ -162,10 +162,13 @@ class ZhihuClient:
         """
         if object_type == "article":
             return f"{self.API_READ_BASE}/articles/{object_id}/comments"
-        elif object_type == "question":
+        elif object_type in ("answer", "question"):
+            # answer: 使用 answer_id；question 为向后兼容保留（同 answer）
             return f"{self.API_READ_BASE}/answers/{object_id}/comments"
         else:
-            raise ValueError(f"不支持的 object_type: {object_type}，应为 'article' 或 'question'")
+            raise ValueError(
+                f"不支持的 object_type: {object_type}，应为 'article'、'answer' 或 'question'"
+            )
 
     def _request_with_retry(self, method: str, url: str, **kwargs) -> requests.Response:
         """
@@ -473,7 +476,7 @@ class ZhihuClient:
                     "id": answer_id,
                     "title": question.get("title", item.get("excerpt", "")),
                     "url": f"https://www.zhihu.com/question/{question.get('id', '')}/answer/{answer_id}",
-                    "type": "question",
+                    "type": "answer",
                 })
 
             paging = data.get("paging", {})
@@ -482,4 +485,54 @@ class ZhihuClient:
             offset += self.PAGE_LIMIT
 
         logger.info("用户 %s 获取到 %d 个回答", user_id, len(all_answers))
+        return all_answers
+
+    def get_question_answers(self, question_id: str) -> list[dict]:
+        """
+        获取指定问题下的全部回答列表
+        参考: FIX-01 — question 类型需先解析 answer_id
+
+        用于展开 type="question" 的监控目标，获取该问题下所有回答的 answer_id，
+        后续用 answer_id 调用评论读写接口。
+
+        Args:
+            question_id: 知乎问题 ID
+
+        Returns:
+            回答字典列表，每项含 id（answer_id）/title/url/type="answer"
+        """
+        url = f"{self.API_READ_BASE}/questions/{question_id}/answers"
+        all_answers: list[dict] = []
+        offset = 0
+
+        while True:
+            params = {"limit": self.PAGE_LIMIT, "offset": offset}
+            delay = random.uniform(self.REQUEST_DELAY_MIN, self.REQUEST_DELAY_MAX)
+            time.sleep(delay)
+
+            logger.debug("请求问题回答: %s offset=%d", url, offset)
+            response = self._request_with_retry("GET", url, params=params)
+            data = response.json()
+
+            items = data.get("data", [])
+            for item in items:
+                answer_id = str(item.get("id", ""))
+                author = item.get("author", {}).get("name", "unknown")
+                all_answers.append({
+                    "id": answer_id,
+                    "title": item.get("question", {}).get("title", ""),
+                    "url": (
+                        f"https://www.zhihu.com/question/{question_id}"
+                        f"/answer/{answer_id}"
+                    ),
+                    "type": "answer",
+                    "_answer_author": author,
+                })
+
+            paging = data.get("paging", {})
+            if paging.get("is_end", True):
+                break
+            offset += self.PAGE_LIMIT
+
+        logger.info("问题 %s 获取到 %d 个回答", question_id, len(all_answers))
         return all_answers

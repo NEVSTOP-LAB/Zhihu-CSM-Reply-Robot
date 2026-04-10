@@ -106,8 +106,13 @@ class TestBuildReadUrl:
         assert url == "https://www.zhihu.com/api/v4/articles/12345/comments"
 
     def test_question_url(self, client):
-        """问题评论应调用 answers 端点"""
+        """问题评论（向后兼容）应调用 answers 端点"""
         url = client._build_read_url("67890", "question")
+        assert url == "https://www.zhihu.com/api/v4/answers/67890/comments"
+
+    def test_answer_url(self, client):
+        """answer 类型应调用 answers 端点（FIX-01）"""
+        url = client._build_read_url("67890", "answer")
         assert url == "https://www.zhihu.com/api/v4/answers/67890/comments"
 
     def test_invalid_type_raises(self, client):
@@ -379,3 +384,64 @@ class TestPostComment:
             result = client.post_comment("99", "article", "内容")
 
         assert result is False
+
+
+# ===== 问题回答列表测试（FIX-01）=====
+
+class TestGetQuestionAnswers:
+    """验证 get_question_answers 通过问题 ID 获取回答列表"""
+
+    @patch("scripts.zhihu_client.time.sleep")
+    def test_returns_answer_type(self, mock_sleep, client):
+        """返回的条目 type 应为 'answer'（FIX-01）"""
+        resp = _make_response(200, {
+            "data": [
+                {
+                    "id": 111111,
+                    "author": {"name": "作者A"},
+                    "question": {"id": 99999, "title": "问题标题"},
+                }
+            ],
+            "paging": {"is_end": True},
+        })
+
+        with patch.object(client.session, "request", return_value=resp):
+            result = client.get_question_answers("99999")
+
+        assert len(result) == 1
+        assert result[0]["id"] == "111111"
+        assert result[0]["type"] == "answer"
+        assert "99999" in result[0]["url"]
+        assert "111111" in result[0]["url"]
+
+    @patch("scripts.zhihu_client.time.sleep")
+    def test_calls_questions_endpoint(self, mock_sleep, client):
+        """应调用 /questions/{id}/answers 端点（FIX-01）"""
+        resp = _make_response(200, {
+            "data": [],
+            "paging": {"is_end": True},
+        })
+
+        with patch.object(client.session, "request", return_value=resp) as mock_req:
+            client.get_question_answers("12345")
+
+        call_args = mock_req.call_args
+        assert "questions/12345/answers" in str(call_args)
+
+    @patch("scripts.zhihu_client.time.sleep")
+    def test_get_user_answers_returns_answer_type(self, mock_sleep, client):
+        """get_user_answers 返回的条目 type 应为 'answer'（FIX-01）"""
+        resp = _make_response(200, {
+            "data": [
+                {
+                    "id": 222222,
+                    "question": {"id": 88888, "title": "回答的问题"},
+                }
+            ],
+            "paging": {"is_end": True},
+        })
+
+        with patch.object(client.session, "request", return_value=resp):
+            result = client.get_user_answers("some_user")
+
+        assert result[0]["type"] == "answer"

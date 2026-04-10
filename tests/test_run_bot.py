@@ -565,20 +565,38 @@ class TestSeenIdsMigration:
 class TestExpandArticles:
     """验证 column/user_answers 类型展开"""
 
-    def test_article_and_question_pass_through(self, runner):
-        """article/question 类型应直接传递"""
+    def test_article_and_answer_pass_through(self, runner):
+        """article/answer 类型应直接传递（FIX-01）"""
         runner.load_config()
         runner.init_modules()
         runner.zhihu_client = MagicMock()
 
         runner.articles = [
             {"id": "1", "type": "article"},
-            {"id": "2", "type": "question"},
+            {"id": "20", "type": "answer"},
         ]
         result = runner._expand_articles()
         assert len(result) == 2
         assert result[0]["type"] == "article"
-        assert result[1]["type"] == "question"
+        assert result[1]["type"] == "answer"
+
+    def test_question_expands_to_answers(self, runner):
+        """question 类型应通过 API 展开为 answer 列表（FIX-01）"""
+        runner.load_config()
+        runner.init_modules()
+        runner.zhihu_client = MagicMock()
+        runner.zhihu_client.get_question_answers.return_value = [
+            {"id": "30", "title": "回答1", "url": "url1", "type": "answer"},
+            {"id": "31", "title": "回答2", "url": "url2", "type": "answer"},
+        ]
+
+        runner.articles = [
+            {"id": "999", "type": "question", "title": "问题标题"},
+        ]
+        result = runner._expand_articles()
+        assert len(result) == 2
+        assert all(a["type"] == "answer" for a in result)
+        runner.zhihu_client.get_question_answers.assert_called_once_with("999")
 
     def test_column_expands_to_articles(self, runner):
         """column 类型应展开为文章列表"""
@@ -598,12 +616,12 @@ class TestExpandArticles:
         assert all(a["type"] == "article" for a in result)
 
     def test_user_answers_expands(self, runner):
-        """user_answers 类型应展开为回答列表"""
+        """user_answers 类型应展开为回答列表（type=answer，FIX-01）"""
         runner.load_config()
         runner.init_modules()
         runner.zhihu_client = MagicMock()
         runner.zhihu_client.get_user_answers.return_value = [
-            {"id": "20", "title": "回答1", "url": "url1", "type": "question"},
+            {"id": "20", "title": "回答1", "url": "url1", "type": "answer"},
         ]
 
         runner.articles = [
@@ -611,7 +629,7 @@ class TestExpandArticles:
         ]
         result = runner._expand_articles()
         assert len(result) == 1
-        assert result[0]["type"] == "question"
+        assert result[0]["type"] == "answer"
 
     def test_column_expand_failure_skips(self, runner):
         """展开失败时应跳过该条目"""
@@ -659,7 +677,7 @@ class TestTypeMapping:
         runner.rag_retriever = MagicMock()
         runner.rag_retriever.retrieve.return_value = []
 
-        # 使用 question 类型的文章
+        # 使用 question 类型的文章（向后兼容）
         runner.articles = [{
             "id": "999",
             "title": "知乎问题",
@@ -670,6 +688,43 @@ class TestTypeMapping:
         runner.process_article(runner.articles[0])
 
         # 验证 post_comment 使用 "answer" 而非 "question"
+        call_args = runner.zhihu_client.post_comment.call_args
+        assert call_args.kwargs.get("object_type") == "answer"
+
+    def test_answer_type_published_as_answer(self, runner):
+        """answer 类型（FIX-01 展开结果）应直接以 answer 发布"""
+        runner.load_config()
+        runner.init_modules()
+
+        runner.zhihu_client = MagicMock()
+        runner.zhihu_client.get_comments.return_value = [
+            _make_comment("ans_1", "LabVIEW 问题"),
+        ]
+        runner.zhihu_client.post_comment.return_value = True
+
+        runner.llm_client = MagicMock()
+        runner.llm_client.generate_reply.return_value = ("回复", 50)
+        runner.llm_client.assess_risk.return_value = ("safe", "安全")
+        runner.llm_client.total_cost_usd = 0.0
+        runner.llm_client.total_prompt_tokens = 0
+        runner.llm_client.total_completion_tokens = 0
+        runner.llm_client.total_cache_hit_tokens = 0
+        runner.llm_client.model = "deepseek-chat"
+        runner.llm_client.summarize_article.return_value = ""
+
+        runner.rag_retriever = MagicMock()
+        runner.rag_retriever.retrieve.return_value = []
+
+        # 使用 answer 类型（FIX-01 展开后的条目）
+        runner.articles = [{
+            "id": "777",
+            "title": "某回答",
+            "url": "https://example.com",
+            "type": "answer",
+        }]
+
+        runner.process_article(runner.articles[0])
+
         call_args = runner.zhihu_client.post_comment.call_args
         assert call_args.kwargs.get("object_type") == "answer"
 

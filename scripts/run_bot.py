@@ -637,10 +637,13 @@ class BotRunner:
             )
 
     def _expand_articles(self) -> list[dict]:
-        """展开 column/user_answers 类型为具体的文章/回答列表
+        """展开 column/user_answers/question 类型为具体的文章/回答列表
 
-        将 articles 配置中的 column 和 user_answers 类型自动展开
-        为对应的 article/question 类型条目。
+        将 articles 配置中的 column、user_answers 和 question 类型自动展开
+        为对应的 article/answer 类型条目。
+
+        - question 类型：通过 API 获取该问题下所有回答的 answer_id，
+          后续用正确的 answer_id 读写评论（FIX-01）
 
         Returns:
             展开后的文章列表
@@ -649,8 +652,26 @@ class BotRunner:
         for article in self.articles:
             article_type = article.get("type", "article")
 
-            if article_type in ("article", "question"):
+            if article_type in ("article", "answer"):
                 expanded.append(article)
+            elif article_type == "question" and self.zhihu_client:
+                # 展开问题：获取问题下所有回答的 answer_id
+                # 参考 FIX-01: question_id ≠ answer_id，需先解析
+                try:
+                    answers = self.zhihu_client.get_question_answers(
+                        article["id"]
+                    )
+                    # 继承文章配置中的 title/url（若 API 未返回）
+                    for ans in answers:
+                        ans.setdefault("title", article.get("title", ""))
+                        ans.setdefault("url", article.get("url", ""))
+                    expanded.extend(answers)
+                    logger.info(
+                        "问题 %s 展开为 %d 个回答",
+                        article["id"], len(answers),
+                    )
+                except Exception as e:
+                    logger.warning("展开问题 %s 失败: %s", article["id"], e)
             elif article_type == "column" and self.zhihu_client:
                 # 展开专栏：获取专栏下全部文章
                 try:
