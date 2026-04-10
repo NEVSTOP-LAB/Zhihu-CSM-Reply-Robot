@@ -47,6 +47,11 @@ class ZhihuRateLimitError(Exception):
     pass
 
 
+class ZhihuRequestError(Exception):
+    """网络请求失败（DNS/超时等），重试后仍失败（FIX-10）"""
+    pass
+
+
 # ─── 数据模型 ──────────────────────────────────────────────────
 
 @dataclass
@@ -230,6 +235,9 @@ class ZhihuClient:
 
         raise ZhihuRateLimitError(
             f"请求失败，已重试 {self.max_retries} 次: {last_exception}"
+        ) if isinstance(last_exception, ZhihuRateLimitError) else ZhihuRequestError(
+            # FIX-10：网络类异常（DNS 失败、超时等）区别于限流，抛出 ZhihuRequestError
+            f"网络请求失败，已重试 {self.max_retries} 次: {last_exception}"
         )
 
     def get_comments(

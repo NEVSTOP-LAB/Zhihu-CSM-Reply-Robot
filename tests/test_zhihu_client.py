@@ -23,6 +23,7 @@ from scripts.zhihu_client import (
     ZhihuClient,
     ZhihuAuthError,
     ZhihuRateLimitError,
+    ZhihuRequestError,
     Comment,
 )
 
@@ -261,6 +262,26 @@ class TestRateLimit:
             client.session, "request", return_value=resp_429
         ):
             with pytest.raises(ZhihuRateLimitError, match="重试"):
+                client.get_comments("99", "article")
+
+    @patch("scripts.zhihu_client.time.sleep")
+    def test_network_error_raises_request_error(self, mock_sleep, client):
+        """网络类异常耗尽重试后应抛出 ZhihuRequestError 而非 ZhihuRateLimitError（FIX-10）"""
+        with patch.object(
+            client.session, "request",
+            side_effect=requests.exceptions.ConnectionError("DNS 失败")
+        ):
+            with pytest.raises(ZhihuRequestError):
+                client.get_comments("99", "article")
+
+    @patch("scripts.zhihu_client.time.sleep")
+    def test_timeout_error_raises_request_error(self, mock_sleep, client):
+        """超时异常耗尽重试后应抛出 ZhihuRequestError（FIX-10）"""
+        with patch.object(
+            client.session, "request",
+            side_effect=requests.exceptions.Timeout("请求超时")
+        ):
+            with pytest.raises(ZhihuRequestError):
                 client.get_comments("99", "article")
 
 
