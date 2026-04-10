@@ -1,0 +1,49 @@
+# 全局配置 - 知乎 CSM 自动回复机器人
+# 参考：docs/plan/README.md 四、关键配置文件格式
+#
+# 所有运行参数统一在此文件管理，articles.yaml 仅维护监控列表
+
+bot:
+  max_new_comments_per_run: 20      # 每次最多处理条数，防止异常
+  max_new_comments_per_day: 100     # 每日上限（防止费用/风控异常）
+  llm_budget_usd_per_day: 0.50     # 每日 LLM 费用预算上限，超出进 pending/
+  reply_prefix: "[rob]"             # 回复前缀，标识自动回复
+  whitelist_users: []               # 白名单用户列表（维护者等），仅记录不做 AI 处理
+
+llm:
+  base_url: "https://api.deepseek.com"   # DeepSeek API 端点（OpenAI 兼容）
+  model: "deepseek-chat"                  # 主模型：DeepSeek-V3
+  fallback_model: "deepseek-reasoner"     # 复杂问题升级模型
+  max_tokens: 250                          # 回复最大 token 数
+  temperature: 0.7                         # 生成温度（0.5-0.8 平衡一致性与自然度）
+
+rag:
+  embedding_model: "BAAI/bge-small-zh-v1.5"     # 本地 Embedding 模型（需 HF 缓存）
+  embedding_fallback: "text-embedding-3-small"   # 线上兜底（需 OPENAI_API_KEY）
+  use_online_embedding: false                     # true = 强制使用线上 embedding
+  top_k: 3                                        # RAG 检索返回数量
+  similarity_threshold: 0.72                      # 相似度阈值（低于此值不返回）
+  history_turns: 6                                # 追问时保留最近 N 轮
+
+vector_store:
+  backend: "actions_cache"    # "git"（旧）| "actions_cache"（推荐，参考 AI-011）
+  max_size_mb: 500            # 超出时触发清理/重建
+  rebuild_interval_days: 30   # 定期重建向量库周期
+
+review:
+  auto_skip_patterns:         # 跳过纯感谢类评论（正则表达式）
+    - "^谢谢[！!]?$"
+    - "^感谢[！!]?$"
+
+filter:
+  max_comment_tokens: 500       # 超长截断阈值（token 数）
+  spam_keywords:                # 广告/违规关键词（命中则跳过回复）
+    - "加微信"
+    - "私信"
+    - "免费领取"
+    - "扫码"
+  dedup_window_minutes: 60      # 同一用户 N 分钟内重复评论忽略
+
+alerting:
+  github_issue: true            # 401/403/429/预算超限时自动创建 Issue
+  consecutive_fail_limit: 3     # 连续失败 N 次后暂停 workflow

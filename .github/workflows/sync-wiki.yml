@@ -1,0 +1,79 @@
+# CSM Wiki 同步 Workflow
+# 实施计划关联：docs/plan/README.md sync-wiki.yml
+# 参考文档：docs/调研/04-CSM-Wiki-RAG知识库.md
+#
+# 功能：同步 CSM Wiki 文档并更新向量索引
+# 触发条件：
+#   - 每周日 UTC 00:00 自动运行
+#   - 支持手动触发（可选择强制重建）
+
+name: Sync CSM Wiki
+
+on:
+  schedule:
+    - cron: '0 0 * * 0'   # 每周日 UTC 00:00
+  workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: '强制重建向量库（忽略 MD5 缓存）'
+        required: false
+        default: 'false'
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  sync-wiki:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30   # 重建向量库可能较慢
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+
+      - name: Cache HuggingFace models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-${{ runner.os }}-bge-small-zh-v1.5
+
+      - name: Cache vector stores
+        uses: actions/cache@v4
+        with:
+          path: |
+            data/vector_store
+            data/reply_index
+          key: vectors-${{ runner.os }}-${{ github.run_number }}
+          restore-keys: |
+            vectors-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Sync Wiki and rebuild vectors
+        env:
+          FORCE_REBUILD: ${{ github.event.inputs.force_rebuild }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+        run: python scripts/wiki_sync.py
+
+      - name: Commit and push changes
+        run: |
+          git config user.name "zhihu-csm-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add -A
+          git diff --staged --quiet || git commit -m "wiki: sync $(date +%Y-%m-%d) [skip ci]"
+          git push || echo "Nothing to push"

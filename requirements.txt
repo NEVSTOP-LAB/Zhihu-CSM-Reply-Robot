@@ -1,0 +1,27 @@
+# 知乎 CSM 自动回复机器人 - 依赖清单
+# 参考：docs/plan/README.md AI-002
+
+# LLM 客户端（OpenAI 兼容接口，支持 DeepSeek）
+openai>=1.0
+
+# 向量数据库（本地持久化，无需服务端）
+chromadb>=0.4.0
+
+# 本地 Embedding 模型（BAAI/bge-small-zh-v1.5）
+sentence-transformers>=2.2.0
+
+# HTTP 请求（知乎 API 调用）
+requests>=2.28.0
+
+# YAML 配置文件解析
+pyyaml>=6.0
+
+# Markdown front-matter 解析（线程文件管理）
+python-frontmatter>=1.0.0
+
+# Token 计数（费用统计与截断）
+tiktoken>=0.5.0
+
+# 测试框架
+pytest>=7.0
+pytest-mock>=3.10.0

@@ -1,0 +1,101 @@
+# 知乎 CSM 自动回复机器人 - 主 Workflow
+# 实施计划关联：AI-004 GitHub Actions Workflow 基础版
+# 参考文档：docs/调研/02-GitHub-Actions自动化.md
+#
+# 触发条件：
+#   - 每15分钟定时执行
+#   - 支持手动触发（workflow_dispatch）
+#
+# 所需 Secrets：
+#   - ZHIHU_COOKIE: 完整的知乎 Cookie 字符串
+#   - LLM_API_KEY: DeepSeek/OpenAI API Key
+#   - LLM_BASE_URL: LLM API 端点（可选，默认 DeepSeek）
+#   - LLM_MODEL: 模型名称（可选，默认 deepseek-chat）
+
+name: Zhihu CSM Reply Bot
+
+on:
+  schedule:
+    # 每15分钟运行一次
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+    # 支持手动触发，方便测试和调试
+
+# 权限：需要写入仓库内容（git push 归档文件）
+permissions:
+  contents: write
+  issues: write    # 告警模块需要创建 Issue（AI-010）
+
+jobs:
+  reply-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15   # 防止异常挂起
+
+    steps:
+      # 1. 检出代码
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0    # 完整历史，用于 git push
+
+      # 2. 设置 Python 环境
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # 3. 缓存 pip 依赖
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            pip-${{ runner.os }}-
+
+      # 4. 缓存 HuggingFace 模型（BAAI/bge-small-zh-v1.5 ~400MB）
+      # 参考：docs/Review-方案/ Embedding 下载稳定性建议
+      - name: Cache HuggingFace models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-${{ runner.os }}-bge-small-zh-v1.5
+          restore-keys: |
+            hf-${{ runner.os }}-
+
+      # 5. 缓存向量数据库（ChromaDB + reply_index）
+      # 参考 AI-011：向量库外部化方案
+      - name: Cache vector stores
+        uses: actions/cache@v4
+        with:
+          path: |
+            data/vector_store
+            data/reply_index
+          key: vectors-${{ runner.os }}-${{ github.run_number }}
+          restore-keys: |
+            vectors-${{ runner.os }}-
+
+      # 6. 安装依赖
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # 7. 运行主程序
+      - name: Run reply bot
+        env:
+          ZHIHU_COOKIE: ${{ secrets.ZHIHU_COOKIE }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+          LLM_MODEL: ${{ secrets.LLM_MODEL }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python scripts/run_bot.py
+
+      # 8. 提交变更（归档文件、seen_ids 等）
+      # 使用 [skip ci] 防止 workflow 循环触发
+      - name: Commit and push changes
+        run: |
+          git config user.name "zhihu-csm-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add -A
+          # 只在有变更时才提交
+          git diff --staged --quiet || git commit -m "bot: auto-reply $(date +%Y-%m-%d) [skip ci]"
+          git push || echo "Nothing to push"
