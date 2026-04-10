@@ -277,7 +277,16 @@ class LLMClient:
             (risk_level, reason):
             - risk_level: "safe"（可自动发布）或 "risky"（需人工审核）
             - reason: 判断理由
+
+        Raises:
+            BudgetExceededError: 超过每日预算
         """
+        # FIX-20：预算检查，与 generate_reply 保持一致
+        if self._daily_cost_usd >= self.budget_usd_per_day:
+            raise BudgetExceededError(
+                f"每日 LLM 费用已达 ${self._daily_cost_usd:.4f}，"
+                f"超过预算 ${self.budget_usd_per_day:.2f}"
+            )
         messages = [
             {
                 "role": "system",

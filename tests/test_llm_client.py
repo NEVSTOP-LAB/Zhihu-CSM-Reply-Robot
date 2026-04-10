@@ -430,3 +430,18 @@ class TestReturnValues:
         assert isinstance(tokens, int)
         assert tokens == 150  # 100 + 50
         assert reply == "回复内容"
+
+
+# ===== assess_risk 预算检查测试（FIX-20）=====
+
+class TestAssessRiskBudget:
+    """验证 assess_risk 也进行预算检查（FIX-20）"""
+
+    @patch("scripts.llm_client.time.sleep")
+    def test_assess_risk_raises_when_budget_exceeded(self, mock_sleep, client):
+        """预算超限时 assess_risk 应抛出 BudgetExceededError（FIX-20）"""
+        # 强制超出预算
+        client._daily_cost_usd = client.budget_usd_per_day + 1.0
+
+        with pytest.raises(BudgetExceededError):
+            client.assess_risk("用户评论", "Bot 回复")
