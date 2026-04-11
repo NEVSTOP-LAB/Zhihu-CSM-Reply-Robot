@@ -472,3 +472,38 @@ class TestEmbeddingFunction:
 
         # 零向量应原样返回，不抛异常
         assert result[0] == [0.0, 0.0, 0.0]
+
+
+# ===== 文件编码兼容性测试 =====
+
+class TestReadText:
+    """_read_text 编码自动检测测试（支持 UTF-8 / GB18030 / Big5）"""
+
+    def test_reads_utf8_file(self, tmp_path):
+        """UTF-8 文件正常读取"""
+        f = tmp_path / "utf8.md"
+        f.write_bytes("# 标题\n\n内容\n".encode("utf-8"))
+        assert RAGRetriever._read_text(f) == "# 标题\n\n内容\n"
+
+    def test_reads_gb18030_file(self, tmp_path):
+        """GB18030 编码（兼容 GBK/GB2312）文件正确解码"""
+        text = "# 简体中文标题\n\n这是 GB18030 编码的正文。\n"
+        f = tmp_path / "gb18030.md"
+        f.write_bytes(text.encode("gb18030"))
+        assert RAGRetriever._read_text(f) == text
+
+    def test_reads_big5_file(self, tmp_path):
+        """Big5 编码（繁体中文）文件正确解码"""
+        text = "# 繁體中文標題\n\n這是 Big5 編碼的正文。\n"
+        f = tmp_path / "big5.md"
+        f.write_bytes(text.encode("big5"))
+        assert RAGRetriever._read_text(f) == text
+
+    def test_fallback_on_unknown_encoding(self, tmp_path):
+        """无法识别编码时回退到 UTF-8 容错模式，不抛异常"""
+        f = tmp_path / "broken.md"
+        # 写入非标准字节序列，UTF-8/GB18030/Big5 均无法正确解码
+        f.write_bytes(b"# Title\n\n\xc3\x28 bad bytes\n")
+        result = RAGRetriever._read_text(f)
+        assert isinstance(result, str)
+        assert "Title" in result  # 可读部分应保留
