@@ -40,19 +40,19 @@ jobs:
     steps:
       # 1. 检出代码
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0    # 完整历史，用于 git push
 
       # 2. 设置 Python 环境
       - name: Setup Python 3.11
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
       # 3. 缓存 pip 依赖
       - name: Cache pip packages
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/pip
           key: pip-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
@@ -62,7 +62,7 @@ jobs:
       # 4. 缓存 HuggingFace 模型（BAAI/bge-small-zh-v1.5 ~400MB）
       # 参考：docs/Review-方案/ Embedding 下载稳定性建议
       - name: Cache HuggingFace models
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/huggingface
           key: hf-${{ runner.os }}-bge-small-zh-v1.5
@@ -73,7 +73,7 @@ jobs:
       # 参考 AI-011：向量库外部化方案
       # 使用 Wiki 文件哈希作为 cache key（FIX-08），内容不变时复用缓存
       - name: Cache vector stores
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             data/vector_store
