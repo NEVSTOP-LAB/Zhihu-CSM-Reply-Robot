@@ -76,6 +76,11 @@ class EmbeddingFunction:
                 f"加载本地 Embedding 模型: {self.model_name}"
                 + (f"，缓存目录: {self.cache_folder}" if self.cache_folder else "")
             )
+            # HF_ENDPOINT="" 空字符串会导致 huggingface_hub 构造出无协议前缀的 URL，
+            # 进而抛出 "Request URL is missing an 'http://' or 'https://' protocol" 异常。
+            # 若变量存在但为空，则移除它，让库使用默认的 HuggingFace 官方端点。
+            if not os.environ.get("HF_ENDPOINT", "").strip():
+                os.environ.pop("HF_ENDPOINT", None)
             self._local_model = SentenceTransformer(
                 self.model_name, cache_folder=self.cache_folder
             )

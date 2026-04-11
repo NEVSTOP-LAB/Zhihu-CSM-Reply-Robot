@@ -447,6 +447,36 @@ class TestEmbeddingFunction:
 
         mock_st.assert_called_once_with("BAAI/bge-small-zh-v1.5", cache_folder=cache_dir)
 
+    def test_get_local_model_clears_empty_hf_endpoint(self, monkeypatch):
+        """HF_ENDPOINT="" 空字符串应在加载模型前被移除，防止 URL 构造错误"""
+        monkeypatch.setenv("HF_ENDPOINT", "")
+        ef = EmbeddingFunction(use_online=False)
+
+        mock_model = MagicMock()
+        mock_model.encode.return_value = [[0.1] * 128]
+
+        import os
+        with patch("sentence_transformers.SentenceTransformer", return_value=mock_model):
+            ef._get_local_model()
+
+        # 加载后 HF_ENDPOINT 应已从环境中移除
+        assert "HF_ENDPOINT" not in os.environ
+
+    def test_get_local_model_keeps_valid_hf_endpoint(self, monkeypatch):
+        """HF_ENDPOINT 有有效值时应保留，不应被清除"""
+        monkeypatch.setenv("HF_ENDPOINT", "https://hf-mirror.com")
+        ef = EmbeddingFunction(use_online=False)
+
+        mock_model = MagicMock()
+        mock_model.encode.return_value = [[0.1] * 128]
+
+        import os
+        with patch("sentence_transformers.SentenceTransformer", return_value=mock_model):
+            ef._get_local_model()
+
+        # 有效的 HF_ENDPOINT 应保留
+        assert os.environ.get("HF_ENDPOINT") == "https://hf-mirror.com"
+
     def test_online_mode_flag(self):
         """线上模式标志应正确设置"""
         ef = EmbeddingFunction(use_online=True)

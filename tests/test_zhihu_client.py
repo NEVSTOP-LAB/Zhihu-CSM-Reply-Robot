@@ -95,6 +95,14 @@ class TestXsrfExtraction:
         client = ZhihuClient(cookie="z_c0=value; _xsrf=end_token")
         assert client._xsrf == "end_token"
 
+    def test_cookie_stripped_of_whitespace(self):
+        """Cookie 值中的首尾空白/换行应被清除（防止 HTTP 头注入）"""
+        client = ZhihuClient(cookie="  z_c0=value; _xsrf=tok\n")
+        assert "\n" not in client.cookie
+        assert client.cookie == "z_c0=value; _xsrf=tok"
+        assert client.session.headers["Cookie"] == "z_c0=value; _xsrf=tok"
+        assert client._xsrf == "tok"
+
 
 # ===== URL 构建测试 =====
 

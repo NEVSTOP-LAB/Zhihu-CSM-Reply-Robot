@@ -132,6 +132,8 @@ class ZhihuClient:
         if not cookie:
             raise ValueError("Cookie 不能为空")
 
+        # HTTP 请求头不允许包含换行符；strip() 清理用户粘贴 Secret 时可能带入的尾部空白/换行
+        cookie = cookie.strip()
         self.cookie = cookie
         self.max_retries = max_retries
         self._xsrf = self._extract_xsrf(cookie)
