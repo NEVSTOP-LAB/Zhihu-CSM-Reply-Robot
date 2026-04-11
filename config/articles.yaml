@@ -27,5 +27,5 @@ articles:
   # 某人发布的全部回答
   - id: "supernevstop"
     title: "supernevstop 的全部回答"
-    url: "https://www.zhihu.com/people/supernevstop/answers
+    url: "https://www.zhihu.com/people/supernevstop/answers"
     type: "user_answers"
