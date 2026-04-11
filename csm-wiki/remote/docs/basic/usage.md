@@ -1,0 +1,356 @@
+---
+title: 创建CSM模块
+layout: default
+parent: 基础文档
+nav_order: 4
+---
+
+# 创建CSM模块
+
+---
+
+## Step1. 创建基于 CSM 的可重用模块
+
+一个可重用模块只需要做好两件事：提供外部接口（API）和发布状态变化（Status/Interrupt）。把这两点说清楚了，别人就能用你的模块，不用管内部怎么实现的。
+
+在CSM里，所有 case 都能当消息调，但建议用 API 分组做外部接口。状态变化就通过 Status 或 Interrupt Status 广播出去。
+
+可参考范例：[创建可重用模块]({% link docs/examples/example-csm-basic-example.md %}#create-a-reuse-module)
+![img](../../assets/img/slides/Baisic-1.Create%20Reuse%20Module(CN).png)
+
+### 设计要点
+
+写个好用的模块，记住这几点：
+
+- **单一职责**：一个模块只干一件事。比如数据采集模块就只管采集，文件模块就只管读写文件
+- **接口清晰**：API 名字要让人一看就懂，像 `API: StartAcquisition`、`API: Stop`。参数和返回值格式要统一
+- **模块独立**：别在代码里写死其他模块的名字。用广播机制解耦，配置用 Attribute 或初始化参数
+- **错误处理**：实现 "Error Handler" 状态处理错误，出错时发 "Error Occurred" 广播通知外部
+
+### API 命名和使用
+
+**命名规范**：
+- 加 "API:" 前缀标识外部接口
+- 动词开头描述操作：`API: Read`、`API: Connect`
+- 语义清晰，别用缩写：推荐 `API: StartAcquisition`，不推荐 `API: StrtAcq`
+
+**常见分类**：
+- 生命周期：Initialize, Start, Stop, Cleanup
+- 配置：SetParameter, GetParameter, LoadConfig
+- 功能：Execute, Query, Update
+
+**文档示例**：
+```labview
+// API: StartAcquisition
+// 功能：启动数据采集
+// 参数：SampleRate(Hz, 1-10000), Channels(逗号分隔，如"AI0,AI1")
+// 返回：Success 或 Error
+// 示例：API: StartAcquisition >> 1000,AI0,AI1 -@ DAQModule
+// 注意：参数值包含特殊字符时需用SAFESTR编码
+```
+
+### 状态广播
+
+**命名**：用描述性名称，如 `DataReady`、`ConnectionEstablished`、`ErrorOccurred`
+
+**优先级**：
+- 普通广播 (Status)：常规通知 - `DataReady >> Data -> <status>`
+- 中断广播 (Interrupt)：紧急通知 - `EmergencyStop >> Reason -> <interrupt>`
+
+### 测试和文档
+
+**测试**：用 CSM 调试控制台逐个测试 API，验证返回值。用全局日志监控消息流，检查广播触发和参数传递。
+
+**文档**：说明模块功能、API 列表（参数/返回值/示例）、广播列表、Attribute 列表，给个基本使用示例就行。
+
+**版本管理**：用语义化版本号（v1.2.3）- 主版本改接口，次版本加功能，修订号修 bug。保持向后兼容。
+
+### 模块命名规则
+
+CSM模块名称不能包含这些特殊字符: `~!@%^&*()\[\]{}+=|\\/?'"<>,.\t\r\n`，这些是CSM框架的保留字符。
+
+详细规则见[CSM基本概念](./concepts#csm模块命名规则)。
+
+### 系统级模块
+
+系统级模块名字前面加个"."，比如 `.SchedulerModule`。它们不会出现在活动模块列表中，只能通过显式消息调用，一般用来做全局后台功能。
+
+更多信息见[CSM高级模式与特性](./advance#系统级模块)。
+
+### CSM Attribute
+
+Attribute 用于存储模块配置和跨模式共享数据，详见[CSM基本概念](./concepts#csm属性csm-attribute)。
+
+## Step2. 在CSM框架中调用模块
+
+当调用者也是CSM模块时，模块之间靠消息字符串通讯。可以用 **[Build Message with Arguments++.vi]({% link docs/reference/api-02-core-functions.md %}#build-message-with-argumentsvi)** 生成消息，或者直接写消息字符串。
+
+### CSM消息语法
+
+``` csm
+#CSM 状态语法
+    // 本地消息
+    DoSth: DoA >> 参数
+
+    // 同步调用
+    API: xxxx >> 参数 -@ TargetModule
+
+    // 异步调用
+    API: xxxx >> 参数 -> TargetModule
+
+    // 无应答异步调用
+    API: xxxx >> 参数 ->| TargetModule
+
+    // 广播普通状态
+    Status >> StatusArguments -><status>
+
+    // 广播中断状态
+    Interrupt >> StatusArguments -><interrupt>
+
+    // 注册状态订阅
+    Status@Source Module >> Handler Module@Handler Module -><register>
+
+    // 取消状态订阅
+    Status@Source Module >> Handler Module -><unregister>
+
+#CSM 注释
+    // 用 "//" 添加注释，右边的内容会被忽略
+    UI: Initialize // 初始化 UI
+```
+
+### 调用流程
+
+**同步调用**：
+1. 构建消息：`API: Operation >> Args -@ TargetModule`
+2. 发送并等待
+3. 收到响应进入 "Response" 状态处理
+
+**异步调用**：
+1. 构建消息：`API: Operation >> Args -> TargetModule`
+2. 发送后立即进入 "Async Message Posted"
+3. 继续干别的事
+4. 收到响应时进入 "Async Response" 状态处理
+
+可参考范例：[CSM调用者场景]({% link docs/examples/example-csm-basic-example.md %}#caller-is-csm-scenario)
+![img](../../assets/img/slides/Baisic-2.Call%20in%20CSM%20Framework(CN).png)
+
+## Step3. 在其他框架中调用CSM模块
+
+如果你用的是 DQMH、Actor Framework 或传统状态机，可以用这些 API 和 CSM 模块通讯：
+
+### 核心API
+
+#### CSM - Post Message.vi
+发送异步消息，不等结果。用于通知型操作，单向数据传递。
+
+```labview
+// 从DQMH发消息给CSM
+[`CSM - Post Message.vi`]({% link docs/reference/api-05-module-operation-api.md %}#csm---post-messagevi)
+  - State: "API: ProcessData"
+  - Arguments: "DataString"
+  - Target Module: "DataProcessor"
+```
+
+#### CSM - Send Message and Wait for Reply.vi
+发送同步消息，等待返回。用于需要立即获取结果的场景。
+
+```labview
+// 查询CSM模块状态
+[`CSM - Send Message and Wait for Reply.vi`]({% link docs/reference/api-05-module-operation-api.md %}#csm---send-message-and-wait-for-replyvi)
+  - State: "API: GetStatus"
+  - Target Module: "StatusModule"
+  - Timeout: 5000ms
+  - Response: 返回的状态信息
+```
+
+**注意**：设置合理的超时时间，处理超时错误，别在事件结构里阻塞。
+
+#### 订阅CSM模块状态
+
+通过用户事件订阅状态变化：
+
+```labview
+// 注册订阅
+[`CSM - Register Broadcast.vi`]({% link docs/reference/api-06-broadcast-registration.md %}#csm---register-broadcastvi)
+  - CSM Name: "SubscriberModule"
+  - Source CSM Name: "DataModule"
+  - Trigger: "DataReady"
+  - API: "ProcessData"
+
+// 在事件结构中处理
+Event Structure
+  - Case: "ProcessData" Event
+  - 处理收到的数据
+```
+
+### 集成模式
+
+**命令-通知模式**：外部框架发命令，订阅CSM的完成通知
+**同步查询模式**：外部框架同步调用CSM获取数据
+**事件驱动模式**：外部框架订阅CSM的状态变化事件
+
+### 集成注意事项
+
+- 事件结构中用 Post 别用 Send & Wait，避免阻塞
+- 可以创建适配器模块转换消息格式
+- 同步调用要设超时保护
+- 通过订阅机制保持状态同步
+
+可参考范例：[其他框架调用者场景]({% link docs/examples/example-csm-basic-example.md %}#caller-is-other-framework-scenario)
+![img](../../assets/img/slides/Baisic-3.Call%20in%20other%20Framework(CN).png)
+
+## Step4. CSM参数传递
+
+CSM 只支持字符串类型参数，但可以通过不同的编码方式传递各种数据。
+
+### 为什么只用字符串？
+
+- **通用性**：字符串可表示任意数据类型，跨模块无需关心类型匹配
+- **可读性**：日志中能直接查看参数内容，方便调试
+- **可扩展**：随时可添加新的编码方案
+
+### 参数类型对比
+
+| 参数类型 | 类型 | 适用场景 | 性能 | 说明 |
+|---|---|---|---|---|
+| 纯字符串 | 内置 | 简单文本 | ⭐⭐⭐⭐⭐ | 直接传，无需编解码 |
+| SAFESTR | 内置 | 有特殊字符的字符串 | ⭐⭐⭐⭐ | 特殊字符转%[HEXCODE] |
+| HEXSTR | 内置 | 复杂数据类型 | ⭐⭐⭐ | 任意数据转十六进制 |
+| ERRSTR | 内置 | 错误传递 | ⭐⭐⭐⭐ | 专门传LabVIEW错误簇 |
+|[MassData](https://github.com/NEVSTOP-LAB/CSM-MassData-Parameter-Support) |插件| 大数组、波形 | ⭐⭐⭐⭐⭐ | 循环缓冲区，高效传大数据 |
+|[API Arguments](https://github.com/NEVSTOP-LAB/CSM-API-String-Arugments-Support) |插件| 多参数API | ⭐⭐⭐⭐ | 支持纯字符串作API参数 |
+|[INI Static Variable](https://github.com/NEVSTOP-LAB/CSM-INI-Static-Variable-Support)|插件| 配置变量 | ⭐⭐⭐⭐ | 提供${variable}支持 |
+
+### 内置参数类型
+
+#### 1. 纯字符串
+最简单，直接传。适合文件路径、配置值、状态描述。
+
+```labview
+API: LoadFile >> C:\Data\test.txt -@ FileModule
+API: SetSampleRate >> 1000 -@ DAQModule
+```
+
+**注意**：不能包含 CSM 关键字（`->`、`-@`等）和换行符。
+
+#### 2. SAFESTR - 安全字符串
+把CSM关键字转成安全格式，比如 `->` 转成 `%3E%3E`。
+
+**API**：
+- 编码：[`CSM - Make String Arguments Safe.vi`]({% link docs/reference/api-03-arguments.md %}#csm-make-string-arguments-safevi)
+- 解码：[`CSM - Revert Arguments-Safe String.vi`]({% link docs/reference/api-03-arguments.md %}#csm-revert-arguments-safe-stringvi)
+
+```labview
+输入: "Value -> Target"
+编码后: "<SAFESTR>Value %2D%3E Target"
+```
+
+用户输入的字符串建议都用 SAFESTR 编码。
+
+#### 3. HEXSTR - 十六进制字符串
+把任意 LabVIEW 数据转成十六进制字符串，支持数组、簇、波形等。
+
+**API**：
+- 编码：[`CSM - Convert Data to HexStr.vi`]({% link docs/reference/api-03-arguments.md %}#csm-convert-data-to-hexstrvi)
+- 解码：[`CSM - Convert HexStr to Data.vi`]({% link docs/reference/api-03-arguments.md %}#csm-convert-hexstr-to-datavi)
+
+```labview
+输入: [1.0, 2.5, 3.7] (DBL Array)
+编码后: "<HEXSTR>000000000000F03F..."
+解码: Variant -> Variant to Data
+```
+
+小于 1KB 的数据用 HEXSTR 合适，大数据用 MassData。
+
+#### 4. ERRSTR - 错误字符串
+专门传 LabVIEW 错误簇。
+
+**API**：
+- 编码：[`CSM - Convert Error to Argument.vi`]({% link docs/reference/api-03-arguments.md %}#csm-convert-error-to-argumentvi)
+- 解码：[`CSM - Convert Argument to Error.vi`]({% link docs/reference/api-03-arguments.md %}#csm-convert-argument-to-errorvi)
+
+```labview
+输入: Error 1 - "File not found"
+编码后: "<ERRSTR>[Error: 1] File not found"
+```
+
+用于错误传播和远程错误报告。
+
+### 参数工具VI
+
+![table](../../assets/img/slides/Baisic-4.Arguments(CN).png)
+
+- [`CSM - Argument Type.vi`]({% link docs/reference/api-03-arguments.md %}#csm-argument-typevi)：识别参数类型
+- [`CSM - Keywords.vi`]({% link docs/reference/api-10-utility-vis.md %}#csm-keywordsvi)：列出CSM关键字
+- Safe/HexStr/ErrStr 编解码 VI 各一对
+
+### 使用场景
+
+**传配置参数**：
+```labview
+// 简单值直接传
+API: SetValue >> 100 -@ Module
+
+// 多参数用分隔符
+API: Configure >> 1000,100,True -@ Module
+```
+
+**传数据数组**：
+```labview
+// 小数组用HEXSTR
+API: ProcessData >> <HEXSTR>... -@ Module
+
+// 大数组用MassData
+API: ProcessData >> <MassData>StartAddr,Length -@ Module
+```
+
+**传错误信息**：
+```labview
+// 用ERRSTR
+API: ReportError >> <ERRSTR>... -@ LogModule
+
+// 或通过广播
+Error Occurred >> <ERRSTR>... -> <status>
+```
+
+**传文件路径**：
+```labview
+// 简单路径直接传
+API: LoadFile >> C:\Data\file.txt -@ Module
+
+// 有特殊字符用SAFESTR
+API: LoadFile >> <SAFESTR>... -@ Module
+```
+
+### 最佳实践
+
+**性能考量**：
+- 小数据（<1KB）用 HEXSTR，大数据（>1KB）用 MassData
+- 频繁传递的共享数据考虑用 Attribute
+
+**调试技巧**：
+- 用全局日志查看参数内容
+- HEXSTR 可还原查看原始数据
+- 添加参数验证代码
+
+### CSM关键字
+
+这些字符不能在参数中直接用，必须用 SAFESTR 编码：
+
+```
+->    异步调用
+->|   异步无返回
+-@    同步调用
+-&    (保留)
+<-    响应
+\r\n  回车换行
+//    注释
+>>    参数分隔
+;,    (保留)
+```
+
+## 相关文档
+
+- [CSM高级模式与特性](./advance)
+- [CSM模块间通讯](./communication)
+- [CSM调试与开发工具](../plugins/tools)
