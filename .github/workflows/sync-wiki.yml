@@ -52,6 +52,9 @@ jobs:
           path: ~/.cache/huggingface
           key: hf-${{ runner.os }}-bge-small-zh-v1.5
 
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
       - name: Fetch remote CSM-Wiki documents
         run: |
           # 从 settings.yaml 读取远端仓库 URL
@@ -74,9 +77,6 @@ jobs:
           key: vectors-${{ runner.os }}-${{ hashFiles('csm-wiki/**') }}
           restore-keys: |
             vectors-${{ runner.os }}-
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
 
       - name: Sync Wiki and rebuild vectors
         env:
