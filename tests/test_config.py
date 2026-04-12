@@ -52,8 +52,12 @@ class TestArticlesConfig:
             )
 
     def test_article_type_valid(self, articles_config: dict):
-        """type 字段只能是 'article' 或 'question'"""
-        valid_types = {"article", "question"}
+        """type 字段只能是支持的类型之一"""
+        # BUG-FIX: 原来只允许 "article"/"question"，但 articles.yaml 已支持
+        # "column"（自动展开专栏）和 "user_answers"（用户全部回答），
+        # 导致本测试始终失败。更新为与 _expand_articles 实现一致的完整类型集。
+        # 参考: docs/实施记录/bug-fixes.md § BUG-FIX-03
+        valid_types = {"article", "question", "column", "user_answers", "answer"}
         for i, article in enumerate(articles_config["articles"]):
             assert article["type"] in valid_types, (
                 f"文章条目 [{i}] 的 type 值 '{article['type']}' "

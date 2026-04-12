@@ -379,15 +379,23 @@ class BotRunner:
 
         object_type = article.get("type", "article")
 
+        # BUG-FIX: 使用 yaml.dump 生成 frontmatter，避免 article_title 或
+        # risk_reason 中含双引号时产生 YAML 解析错误，导致 approve_pending 静默失败。
+        # 参考: docs/实施记录/bug-fixes.md § BUG-FIX-02
+        meta = {
+            "article_id": article["id"],
+            "article_title": article.get("title", ""),
+            "object_type": object_type,
+            "comment_id": comment_id,
+            "generated_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+            "status": "pending",
+            "risk_reason": risk_reason,
+        }
+        meta_yaml = yaml.dump(meta, allow_unicode=True, default_flow_style=False)
+
         content = (
             f"---\n"
-            f"article_id: \"{article['id']}\"\n"
-            f"article_title: \"{article.get('title', '')}\"\n"
-            f"object_type: \"{object_type}\"\n"
-            f"comment_id: \"{comment_id}\"\n"
-            f"generated_at: \"{datetime.now().strftime('%Y-%m-%dT%H:%M:%S')}\"\n"
-            f"status: pending\n"
-            f"risk_reason: \"{risk_reason}\"\n"
+            f"{meta_yaml}"
             f"---\n\n"
             f"## 原始评论\n\n"
             f"> {comment_content}\n\n"
@@ -735,6 +743,21 @@ class BotRunner:
                 },
             )
 
+            # BUG-FIX: 必须在 append_turn 之前调用 build_context_messages。
+            # 若在 append_turn 之后调用，真人回复会被 _parse_turns 识别为 "user" 角色
+            # （因为标题含"真人回复"而非"Bot 回复"），导致 reversed 搜索取到的
+            # question 是作者自己的回复内容，而非用户原始提问，RAG 索引错误。
+            # 参考: docs/实施记录/bug-fixes.md § BUG-FIX-01
+            question_for_rag = "用户评论"  # 默认值
+            if self.rag_retriever:
+                messages = self.thread_manager.build_context_messages(
+                    thread_path, max_turns=6
+                )
+                for msg in reversed(messages):
+                    if msg.get("role") == "user":
+                        question_for_rag = msg.get("content", question_for_rag)
+                        break
+
             # 追加真人回复（带 ⭐ 标记）
             self.thread_manager.append_turn(
                 thread_path=thread_path,
@@ -746,21 +769,13 @@ class BotRunner:
 
         # 索引到 reply_index
         if self.rag_retriever:
-            # 从历史消息中找最近一条 role=="user" 的内容作为 question（FIX-12）
-            # 参考: docs/plan/2026-04-10-code-review-fixes.md § FIX-12
-            question = "用户评论"  # 默认值
-            if self.thread_manager:
-                messages = self.thread_manager.build_context_messages(
-                    thread_path, max_turns=6
-                )
-                # 从最新向最旧遍历，取第一条 user 消息
-                for msg in reversed(messages):
-                    if msg.get("role") == "user":
-                        question = msg.get("content", question)
-                        break
+            # question_for_rag 在上方 thread_manager 块中已从历史提取
+            # 若 thread_manager 为 None，使用默认值
+            if not self.thread_manager:
+                question_for_rag = "用户评论"
 
             self.rag_retriever.index_human_reply(
-                question=question,
+                question=question_for_rag,
                 reply=comment.content,
                 article_id=article["id"],
                 thread_id=self._get_thread_root_id(comment),

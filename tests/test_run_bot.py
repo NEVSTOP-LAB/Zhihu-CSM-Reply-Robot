@@ -616,6 +616,30 @@ class TestWritePending:
 
         assert (bot_root / "data" / "pending" / "AAA_BBB.md").exists()
 
+    def test_pending_yaml_safe_with_quotes_in_risk_reason(self, runner, bot_root):
+        """BUG-FIX-02: risk_reason 含双引号时 frontmatter 应仍可被正确解析"""
+        import frontmatter as fm
+
+        runner.load_config()
+        article = {"id": "QQ", "title": 'Title with "quotes"'}
+
+        runner._write_pending(
+            article=article,
+            comment_content="评论内容",
+            reply_content="回复内容",
+            comment_id="RR",
+            risk_reason='包含 "双引号" 的风险理由',
+        )
+
+        filepath = bot_root / "data" / "pending" / "QQ_RR.md"
+        assert filepath.exists()
+
+        # frontmatter.load 必须能正常解析，不抛出异常
+        post = fm.load(str(filepath))
+        assert post.metadata.get("article_id") == "QQ"
+        assert post.metadata.get("comment_id") == "RR"
+        assert '"双引号"' in post.metadata.get("risk_reason", "")
+
 
 # ===== AI 风险评估与自动发布测试 =====
 
@@ -1146,6 +1170,74 @@ class TestHumanReplyQuestion:
         question = call_args.kwargs.get("question", call_args[0][0] if call_args[0] else "")
         assert question == "用户的真实提问", (
             f"question 应为最近 user 消息，但实际为: {question!r}"
+        )
+
+    def test_human_reply_question_not_self_indexed(self, runner, bot_root):
+        """BUG-FIX-01: build_context_messages 必须在 append_turn 之前调用，
+        否则真人回复本身会被当成"用户提问"索引到 RAG。
+        本测试用真实 ThreadManager 验证顺序正确。"""
+        from scripts.thread_manager import ThreadManager
+
+        runner.load_config()
+        runner.init_modules()
+        # 使用真实的 ThreadManager
+        runner.thread_manager = ThreadManager(archive_dir=str(bot_root / "archive"))
+
+        article = {"id": "art1", "title": "Test Article", "type": "article",
+                   "url": "http://example.com"}
+        runner.articles = [article]
+
+        # 在线程里预先写入一条用户提问（模拟之前的 bot 交互）
+        thread_path = runner.thread_manager.get_or_create_thread(
+            article_id="art1",
+            root_comment={"id": "uc1", "author": "alice"},
+            article_meta={"title": "Test Article", "url": "http://example.com"},
+        )
+        runner.thread_manager.append_turn(
+            thread_path=thread_path,
+            author="alice",
+            content="CSM 是什么？",
+            comment_id="uc1",
+        )
+        runner._comment_thread_map["uc1"] = "uc1"
+
+        runner.zhihu_client = MagicMock()
+        runner.rag_retriever = MagicMock()
+        runner.rag_retriever.retrieve.return_value = []
+        runner.llm_client = MagicMock()
+        runner.llm_client.summarize_article.return_value = ""
+
+        # 作者人工回复该提问
+        human_comment = _make_comment(
+            "hr2",
+            "CSM 是 Communicable State Machine",
+            is_author_reply=True,
+            parent_id="uc1",
+        )
+        runner._comment_thread_map["hr2"] = "uc1"
+        runner._seen_ids_path.parent.mkdir(parents=True, exist_ok=True)
+        runner._bootstrapped_articles.add("art1")
+        runner._seen_ids = set()
+
+        runner.zhihu_client.get_comments.return_value = [human_comment]
+
+        runner.process_article(article)
+
+        call_args = runner.rag_retriever.index_human_reply.call_args
+        assert call_args is not None, "index_human_reply 应被调用"
+        # 兼容 keyword 参数和位置参数两种调用形式
+        question = call_args.kwargs.get("question")
+        if question is None and call_args.args:
+            question = call_args.args[0]
+        question = question or ""
+        # 正确行为：question 应该是用户的提问，不应该是作者的回复内容
+        assert "CSM 是什么" in question, (
+            f"question 应为用户提问 'CSM 是什么？'，实际为: {question!r}. "
+            "若此测试失败说明 build_context_messages 在 append_turn 之后被调用，"
+            "导致真人回复本身被当成问题索引。"
+        )
+        assert "Communicable State Machine" not in question, (
+            f"question 不应为作者的回复内容，实际为: {question!r}"
         )
 
 
