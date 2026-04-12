@@ -494,7 +494,9 @@ class ZhihuClient:
                 if item.get("type") != "article":
                     continue
                 content = item.get("content", {})
-                article_id = str(content.get("id", ""))
+                article_id = str(content.get("id") or "")
+                if not article_id:
+                    continue
                 all_articles.append({
                     "id": article_id,
                     "title": content.get("title", ""),
