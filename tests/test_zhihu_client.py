@@ -617,6 +617,37 @@ class TestCookieIsolation:
         assert result[0]["type"] == "article"
 
     @patch("scripts.zhihu_client.time.sleep")
+    def test_get_column_articles_handles_non_dict_response(self, mock_sleep, client):
+        """get_column_articles 遇到非 dict 响应体时应安全返回空列表"""
+        # API 偶尔会在 200 状态下返回一个 JSON 字符串而非对象
+        resp = _make_response(200, "认证失败")  # response.json() 返回字符串
+
+        with patch.object(client.read_session, "request", return_value=resp):
+            result = client.get_column_articles("c_1234567890")
+
+        assert result == []
+
+    @patch("scripts.zhihu_client.time.sleep")
+    def test_get_column_articles_skips_non_dict_items(self, mock_sleep, client):
+        """get_column_articles data[] 中出现非 dict 条目时应跳过，不引发 AttributeError"""
+        resp = _make_response(200, {
+            "data": [
+                "unexpected_string_item",  # 非 dict，应被跳过
+                {
+                    "type": "article",
+                    "content": {"id": 42, "title": "正常文章", "url": "https://zhuanlan.zhihu.com/p/42"},
+                },
+            ],
+            "paging": {"is_end": True},
+        })
+
+        with patch.object(client.read_session, "request", return_value=resp):
+            result = client.get_column_articles("c_1234567890")
+
+        assert len(result) == 1
+        assert result[0]["id"] == "42"
+
+    @patch("scripts.zhihu_client.time.sleep")
     def test_get_user_answers_uses_write_session(self, mock_sleep, client):
         """get_user_answers 应使用 write_session（含 Cookie）— 该接口需要认证"""
         resp = _make_response(200, {

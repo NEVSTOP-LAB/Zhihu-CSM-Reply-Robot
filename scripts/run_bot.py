@@ -839,6 +839,8 @@ class BotRunner:
                         "问题 %s 展开为 %d 个回答",
                         article["id"], len(answers),
                     )
+                except (ZhihuAuthError, ZhihuRateLimitError):
+                    raise
                 except Exception as e:
                     logger.warning("展开问题 %s 失败: %s", article["id"], e)
             elif article_type == "column" and self.zhihu_client:
@@ -852,6 +854,8 @@ class BotRunner:
                         "专栏 %s 展开为 %d 篇文章",
                         article["id"], len(column_articles),
                     )
+                except (ZhihuAuthError, ZhihuRateLimitError):
+                    raise
                 except Exception as e:
                     logger.warning("展开专栏 %s 失败: %s", article["id"], e)
             elif article_type == "user_answers" and self.zhihu_client:
@@ -865,6 +869,8 @@ class BotRunner:
                         "用户 %s 展开为 %d 个回答",
                         article["id"], len(user_answers),
                     )
+                except (ZhihuAuthError, ZhihuRateLimitError):
+                    raise
                 except Exception as e:
                     logger.warning("展开用户 %s 回答失败: %s", article["id"], e)
             else:
@@ -920,7 +926,31 @@ class BotRunner:
         捕获认证/限流/预算异常并触发告警。
         """
         # 展开 column/user_answers 为具体的文章/回答
-        articles_to_process = self._expand_articles()
+        try:
+            articles_to_process = self._expand_articles()
+        except ZhihuAuthError as e:
+            logger.error("展开监控目标时认证失败: %s", e)
+            if self.alert_manager:
+                self.alert_manager.alert_cookie_expired(e.status_code)
+            return
+        except ZhihuRateLimitError as e:
+            logger.error("展开监控目标时限流: %s", e)
+            if self.alert_manager:
+                self.alert_manager.alert_rate_limited()
+            return
+
+        if not articles_to_process and self.articles:
+            logger.error(
+                "展开后监控目标为空（配置了 %d 个），所有目标均展开失败",
+                len(self.articles),
+            )
+            if self.alert_manager:
+                self.alert_manager.alert_expansion_failed(
+                    configured_count=len(self.articles),
+                    recent_logs=self._log_handler.format_markdown(50),
+                )
+            return
+
         logger.info("展开后共 %d 个监控目标", len(articles_to_process))
 
         for article in articles_to_process:

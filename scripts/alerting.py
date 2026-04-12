@@ -226,6 +226,30 @@ class AlertManager:
             body += f"\n### 最近日志\n\n{recent_logs}\n"
         self.create_issue(title, body, labels=["bot-alert", "failure"])
 
+    def alert_expansion_failed(self, configured_count: int, recent_logs: str = ""):
+        """监控目标展开失败告警
+
+        所有配置的 column/user_answers/question 类型均展开失败，
+        导致本轮没有任何监控目标可处理。
+
+        Args:
+            configured_count: 配置的监控目标数量
+            recent_logs: 最近日志内容（Markdown 格式），用于快速定位问题
+        """
+        title = "🔴 Bot Alert: 监控目标全部展开失败"
+        body = (
+            f"## 监控目标展开失败\n\n"
+            f"- **配置目标数**: {configured_count}\n"
+            f"- **展开后目标数**: 0\n"
+            f"- **时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            f"所有监控目标均展开失败，本轮未处理任何评论。\n"
+            f"请检查 Cookie 是否有效，以及专栏/用户配置是否正确。\n"
+        )
+        if recent_logs:
+            body += f"\n### 最近日志\n\n{recent_logs}\n"
+        self.create_issue(title, body, labels=["bot-alert", "expansion-failed"])
+        self.record_health("expansion_failed", {"configured_count": configured_count})
+
     def record_health(self, status: str, details: dict | None = None):
         """记录 Cookie 健康状态
 

@@ -486,11 +486,17 @@ class ZhihuClient:
             logger.debug("请求专栏文章: %s offset=%d", url, offset)
             response = self._request_with_retry("GET", url, params=params, session=self.read_session)
             data = response.json()
+            if not isinstance(data, dict):
+                logger.warning("专栏 %s 返回非预期格式: %r", column_id, data)
+                break
 
             items = data.get("data", [])
             for item in items:
                 # /items 接口返回格式: {type: "article", content: {...}}
                 # 仅处理文章类型，忽略 pin 等其他类型
+                if not isinstance(item, dict):
+                    logger.warning("专栏 %s 条目格式异常（非 dict）: %r", column_id, item)
+                    continue
                 if item.get("type") != "article":
                     continue
                 content = item.get("content", {})

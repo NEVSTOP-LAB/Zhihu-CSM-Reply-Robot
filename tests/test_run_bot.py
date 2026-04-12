@@ -494,6 +494,44 @@ class TestExceptionHandling:
         runner.run_articles()
         runner.alert_manager.alert_cookie_expired.assert_called_once()
 
+    def test_expand_auth_error_triggers_alert_and_stops(self, runner):
+        """展开监控目标时 ZhihuAuthError 应触发告警并终止"""
+        runner.load_config()
+        runner.init_modules()
+
+        runner.zhihu_client = MagicMock()
+        runner.zhihu_client.get_user_answers.side_effect = ZhihuAuthError(
+            "认证失败 HTTP 403", status_code=403
+        )
+
+        runner.articles = [{"id": "some-user", "type": "user_answers"}]
+        runner.alert_manager = MagicMock()
+
+        runner.load_seen_ids()
+        runner.run_articles()
+
+        runner.alert_manager.alert_cookie_expired.assert_called_once_with(403)
+        # 没有尝试处理任何文章
+        runner.zhihu_client.get_comments.assert_not_called()
+
+    def test_expand_zero_targets_triggers_alert(self, runner):
+        """展开后目标为空时应触发 alert_expansion_failed 告警"""
+        runner.load_config()
+        runner.init_modules()
+
+        runner.zhihu_client = MagicMock()
+        runner.zhihu_client.get_column_articles.side_effect = Exception("网络错误")
+
+        runner.articles = [{"id": "fail-col", "type": "column"}]
+        runner.alert_manager = MagicMock()
+
+        runner.load_seen_ids()
+        runner.run_articles()
+
+        runner.alert_manager.alert_expansion_failed.assert_called_once()
+        call_kwargs = runner.alert_manager.alert_expansion_failed.call_args
+        assert call_kwargs.kwargs.get("configured_count", call_kwargs.args[0] if call_kwargs.args else None) == 1
+
     def test_budget_exceeded_triggers_alert(self, runner, bot_root):
         """BudgetExceededError 应触发告警并终止"""
         runner.load_config()
@@ -827,7 +865,7 @@ class TestExpandArticles:
         assert result[0]["type"] == "answer"
 
     def test_column_expand_failure_skips(self, runner):
-        """展开失败时应跳过该条目"""
+        """展开失败时应跳过该条目（非认证类错误）"""
         runner.load_config()
         runner.init_modules()
         runner.zhihu_client = MagicMock()
@@ -842,6 +880,44 @@ class TestExpandArticles:
         assert len(result) == 1
         assert result[0]["id"] == "1"
 
+    def test_column_expand_auth_error_propagates(self, runner):
+        """展开专栏时认证失败应向上传播（不被吞掉）"""
+        runner.load_config()
+        runner.init_modules()
+        runner.zhihu_client = MagicMock()
+        runner.zhihu_client.get_column_articles.side_effect = ZhihuAuthError(
+            "认证失败 HTTP 403: Cookie 失效", status_code=403
+        )
+
+        runner.articles = [{"id": "col-1", "type": "column"}]
+        with pytest.raises(ZhihuAuthError):
+            runner._expand_articles()
+
+    def test_user_answers_expand_auth_error_propagates(self, runner):
+        """展开用户回答时认证失败应向上传播（不被吞掉）"""
+        runner.load_config()
+        runner.init_modules()
+        runner.zhihu_client = MagicMock()
+        runner.zhihu_client.get_user_answers.side_effect = ZhihuAuthError(
+            "认证失败 HTTP 403", status_code=403
+        )
+
+        runner.articles = [{"id": "some-user", "type": "user_answers"}]
+        with pytest.raises(ZhihuAuthError):
+            runner._expand_articles()
+
+    def test_question_expand_auth_error_propagates(self, runner):
+        """展开问题时认证失败应向上传播"""
+        runner.load_config()
+        runner.init_modules()
+        runner.zhihu_client = MagicMock()
+        runner.zhihu_client.get_question_answers.side_effect = ZhihuAuthError(
+            "认证失败 HTTP 403", status_code=403
+        )
+
+        runner.articles = [{"id": "123", "type": "question"}]
+        with pytest.raises(ZhihuAuthError):
+            runner._expand_articles()
 
 # ===== post_comment 类型映射测试 =====
 

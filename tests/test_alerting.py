@@ -212,6 +212,42 @@ class TestAlertScenarios:
         payload = mock_post.call_args[1]["json"]
         assert "最近日志" not in payload["body"]
 
+    def test_alert_expansion_failed(self, manager, health_file):
+        """展开失败告警应包含配置数量和最近日志"""
+        sample_logs = "```\n[WARNING] 展开专栏失败\n```"
+        with patch.object(
+            manager._session, "get", side_effect=_mock_get_no_issues
+        ), patch.object(
+            manager._session, "post", side_effect=_mock_post_success
+        ) as mock_post:
+            manager.alert_expansion_failed(configured_count=3, recent_logs=sample_logs)
+
+        payload = mock_post.call_args[1]["json"]
+        assert "展开失败" in payload["title"]
+        assert "3" in payload["body"]
+        assert "最近日志" in payload["body"]
+        assert "展开专栏失败" in payload["body"]
+        assert "expansion-failed" in payload["labels"]
+
+        # 验证 health.json 被写入
+        assert health_file.exists()
+        data = json.loads(health_file.read_text())
+        assert data["status"] == "expansion_failed"
+        assert data["details"]["configured_count"] == 3
+
+    def test_alert_expansion_failed_no_logs(self, manager):
+        """不传日志时展开失败告警仍应正常创建"""
+        with patch.object(
+            manager._session, "get", side_effect=_mock_get_no_issues
+        ), patch.object(
+            manager._session, "post", side_effect=_mock_post_success
+        ) as mock_post:
+            manager.alert_expansion_failed(configured_count=2)
+
+        payload = mock_post.call_args[1]["json"]
+        assert "expansion-failed" in payload["labels"]
+        assert "最近日志" not in payload["body"]
+
 
 # ===== 健康状态记录测试 =====
 
