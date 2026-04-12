@@ -52,8 +52,8 @@ class TestArticlesConfig:
             )
 
     def test_article_type_valid(self, articles_config: dict):
-        """type 字段只能是 'article' 或 'question'"""
-        valid_types = {"article", "question"}
+        """type 字段只能是 'article', 'question', 'column', 或 'user_answers'"""
+        valid_types = {"article", "question", "column", "user_answers"}
         for i, article in enumerate(articles_config["articles"]):
             assert article["type"] in valid_types, (
                 f"文章条目 [{i}] 的 type 值 '{article['type']}' "
