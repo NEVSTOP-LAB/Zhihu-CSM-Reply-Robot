@@ -1,32 +1,4 @@
-# AI-002: 监控的知乎文章/问题/专栏/用户列表
-# 参考: docs/plan/README.md § 四、关键配置文件格式
-#
-# 维护说明：
-# - 仅包含需要监控回复的目标
-# - type 字段支持：
-#   - "article" — 单篇专栏文章
-#   - "question" — 知乎问题（监控该问题下所有回答的评论）
-#   - "column" — 整个专栏（自动展开为该专栏下全部文章）
-#   - "user_answers" — 某人发布的全部回答
-# - 所有运行参数统一在 config/settings.yaml 中管理
-
-articles:
-
-  # 整个专栏（自动监控专栏内全部文章）
-  # id 必须与知乎专栏 URL 路径一致，如 /column/c_1681072169147342848 对应 id = c_1681072169147342848
-  - id: "c_1681072169147342848"
-    title: "可通讯状态机(CSM)框架"
-    url: "https://www.zhihu.com/column/c_1681072169147342848"
-    type: "column"
-
-  # 整个专栏（自动监控专栏内全部文章）
-  - id: "c_1770421455375126528"
-    title: "NEVSTOP-LAB"
-    url: "https://www.zhihu.com/column/c_1770421455375126528"
-    type: "column"
-
-  # 某人发布的全部回答
-  - id: "supernevstop"
-    title: "supernevstop 的全部回答"
-    url: "https://www.zhihu.com/people/supernevstop/answers"
-    type: "user_answers"
+# 收件箱配置（已弃用）
+# 本文件保留用于向后兼容；消息现在通过 data/inbox/ 目录接收
+# 不再需要配置知乎文章监控目标
+articles: []

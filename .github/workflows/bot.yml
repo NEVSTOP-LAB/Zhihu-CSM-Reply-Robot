@@ -1,5 +1,5 @@
-# 知乎 CSM 自动回复机器人 - 主 Workflow
-# 实施计划关联：AI-004 GitHub Actions Workflow 基础版
+# CSM RAG/LLM 问答机器人 - 主 Workflow
+# 实施计划关联：AI-004 GitHub Actions Workflow
 # 参考文档：docs/调研/02-GitHub-Actions自动化.md
 #
 # 触发条件：
@@ -7,12 +7,11 @@
 #   - 支持手动触发（workflow_dispatch）
 #
 # 所需 Secrets：
-#   - ZHIHU_COOKIE: 完整的知乎 Cookie 字符串
 #   - LLM_API_KEY: DeepSeek/OpenAI API Key
 #   - LLM_BASE_URL: LLM API 端点（可选，默认 DeepSeek）
 #   - LLM_MODEL: 模型名称（可选，默认 deepseek-chat）
 
-name: Zhihu CSM Reply Bot
+name: CSM RAG/LLM Reply Bot
 
 on:
   schedule:
@@ -60,7 +59,6 @@ jobs:
             pip-${{ runner.os }}-
 
       # 4. 缓存 HuggingFace 模型（BAAI/bge-small-zh-v1.5 ~400MB）
-      # 参考：docs/Review-方案/ Embedding 下载稳定性建议
       - name: Cache HuggingFace models
         uses: actions/cache@v5
         with:
@@ -70,8 +68,6 @@ jobs:
             hf-${{ runner.os }}-
 
       # 5. 缓存向量数据库（ChromaDB + reply_index）
-      # 参考 AI-011：向量库外部化方案
-      # 使用 Wiki 文件哈希作为 cache key（FIX-08），内容不变时复用缓存
       - name: Cache vector stores
         uses: actions/cache@v5
         with:
@@ -89,24 +85,18 @@ jobs:
       # 7. 运行主程序
       - name: Run reply bot
         env:
-          ZHIHU_COOKIE: ${{ secrets.ZHIHU_COOKIE }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
           LLM_MODEL: ${{ secrets.LLM_MODEL }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # HuggingFace 镜像站端点（可选）；通过仓库 Variables 配置 HF_ENDPOINT
-          # 例如设置为 https://hf-mirror.com 可加速中国大陆的模型下载
-          # 若未配置则使用 HuggingFace 官方端点
           HF_ENDPOINT: ${{ vars.HF_ENDPOINT || 'https://huggingface.co' }}
         run: python scripts/run_bot.py
 
       # 8. 提交变更（归档文件、seen_ids 等）
-      # 使用 [skip ci] 防止 workflow 循环触发
       - name: Commit and push changes
         run: |
-          git config user.name "zhihu-csm-bot"
+          git config user.name "csm-reply-bot"
           git config user.email "bot@users.noreply.github.com"
           git add -A
-          # 只在有变更时才提交
           git diff --staged --quiet || git commit -m "bot: auto-reply $(date +%Y-%m-%d) [skip ci]"
           git push || echo "Nothing to push"

@@ -1,18 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-主入口 — 知乎 CSM 自动回复机器人
-==================================
-
-实施计划关联：AI-009 主流程 run_bot.py — MVP 版
-参考文档：docs/plan/README.md 一、系统逻辑流程图
+主入口 — CSM RAG/LLM 问答机器人
+=================================
 
 串联所有模块的主流程：
 1. 加载配置，初始化模块
 2. 每日处理量检查
-3. 遍历文章 → 拉取评论 → 过滤 → RAG → LLM → pending/
-4. 检测真人回复 → 索引
-5. 异常告警（认证/预算）
-6. 退出前 git commit
+3. 读取收件箱 → 过滤 → RAG → LLM → pending/
+4. 检测专家回复 → 索引
+5. 异常告警（预算）
 
 使用方式：
     python scripts/run_bot.py
@@ -22,8 +18,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
 from collections import deque
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -33,7 +31,6 @@ import yaml
 # 确保可以导入 scripts 模块
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from scripts.zhihu_client import ZhihuClient, ZhihuAuthError, ZhihuRateLimitError
 from scripts.rag_retriever import RAGRetriever
 from scripts.llm_client import LLMClient, BudgetExceededError
 from scripts.thread_manager import ThreadManager
@@ -42,6 +39,28 @@ from scripts.alerting import AlertManager
 from scripts.cost_tracker import CostTracker
 
 logger = logging.getLogger(__name__)
+
+
+# ─── 数据模型 ──────────────────────────────────────────────────
+
+@dataclass
+class Message:
+    """通用消息数据模型
+
+    Attributes:
+        id: 消息 ID
+        content: 消息内容
+        author: 消息作者
+        created_time: 创建时间戳（Unix 秒）
+        parent_id: 父消息 ID（追问时非空）
+        is_author_reply: 是否为专家/维护者的权威回复（True 时仅索引，不生成 AI 回复）
+    """
+    id: str
+    content: str
+    author: str
+    created_time: int
+    parent_id: Optional[str] = None
+    is_author_reply: bool = False
 
 
 class RecentLogsHandler(logging.Handler):
@@ -79,9 +98,7 @@ class RecentLogsHandler(logging.Handler):
 class BotRunner:
     """主流程控制器
 
-    实施计划关联：AI-009
-
-    串联所有模块，实现 pending/ 人工审核 MVP。
+    串联所有模块，实现 pending/ 人工审核流程。
 
     Args:
         project_root: 项目根目录路径
@@ -90,10 +107,8 @@ class BotRunner:
     def __init__(self, project_root: str | Path = "."):
         self.root = Path(project_root)
         self.settings: dict = {}
-        self.articles: list[dict] = []
 
         # 模块实例（延迟初始化）
-        self.zhihu_client: Optional[ZhihuClient] = None
         self.rag_retriever: Optional[RAGRetriever] = None
         self.llm_client: Optional[LLMClient] = None
         self.thread_manager: Optional[ThreadManager] = None
@@ -107,11 +122,6 @@ class BotRunner:
         self._seen_ids: set[str] = set()
         self._seen_ids_path = self.root / "data" / "seen_ids.json"
 
-        # 已完成冷启动归档的文章集合
-        # 参考: Issue #1 — 首次启动只归档，不回复，避免重复回复历史评论
-        self._bootstrapped_articles: set[str] = set()
-        self._bootstrapped_path = self.root / "data" / "bootstrapped_articles.json"
-
         # 评论 ID → 线程根 ID 映射（Issue #3：修复多级回复的线程归档逻辑）
         # 用于在多级嵌套回复中正确追溯到最顶层的根评论，将同一对话归入同一线程文件
         self._comment_thread_map: dict[str, str] = {}
@@ -124,20 +134,15 @@ class BotRunner:
     def load_config(self):
         """加载配置文件
 
-        从 config/settings.yaml 和 config/articles.yaml 读取配置。
+        从 config/settings.yaml 读取配置。
         """
         settings_path = self.root / "config" / "settings.yaml"
-        articles_path = self.root / "config" / "articles.yaml"
 
         with open(settings_path, "r", encoding="utf-8") as f:
             self.settings = yaml.safe_load(f)
 
-        with open(articles_path, "r", encoding="utf-8") as f:
-            articles_data = yaml.safe_load(f)
-            self.articles = articles_data.get("articles", [])
-
         logger.info(
-            f"配置加载完成: {len(self.articles)} 篇文章, "
+            f"配置加载完成: "
             f"每日上限 {self.settings['bot']['max_new_comments_per_day']}"
         )
 
@@ -146,13 +151,6 @@ class BotRunner:
 
         从环境变量和配置文件创建各模块实例。
         """
-        # 知乎客户端
-        cookie = os.environ.get("ZHIHU_COOKIE", "")
-        if cookie:
-            self.zhihu_client = ZhihuClient(cookie=cookie)
-        else:
-            logger.warning("未设置 ZHIHU_COOKIE，跳过知乎客户端初始化")
-
         # RAG 检索器
         rag_cfg = self.settings.get("rag", {})
         self.rag_retriever = RAGRetriever(
@@ -184,7 +182,7 @@ class BotRunner:
             archive_dir=str(self.root / "archive")
         )
 
-        # 评论过滤器（data_dir 用于持久化 dedup 缓存，FIX-04）
+        # 消息过滤器（data_dir 用于持久化 dedup 缓存）
         self.comment_filter = CommentFilter(
             settings=self.settings,
             data_dir=str(self.root / "data"),
@@ -239,31 +237,13 @@ class BotRunner:
                 self.save_seen_ids()
                 logger.info("已将 seen_ids 文件迁移为标准列表格式: %s", self._seen_ids_path)
 
-        logger.info(f"已加载 {len(self._seen_ids)} 个已处理评论 ID")
+        logger.info(f"已加载 {len(self._seen_ids)} 个已处理消息 ID")
 
     def save_seen_ids(self):
-        """保存已处理的评论 ID 集合"""
+        """保存已处理的消息 ID 集合"""
         self._seen_ids_path.parent.mkdir(parents=True, exist_ok=True)
         with open(self._seen_ids_path, "w", encoding="utf-8") as f:
             json.dump(sorted(self._seen_ids), f)
-
-    def load_bootstrapped_articles(self):
-        """加载已完成冷启动归档的文章 ID 集合
-        参考: Issue #1 — 首次启动只归档，不回复
-        """
-        self._bootstrapped_articles = set()
-        if self._bootstrapped_path.exists():
-            with open(self._bootstrapped_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, list):
-                self._bootstrapped_articles = set(data)
-        logger.info("已加载 %d 个已归档文章 ID", len(self._bootstrapped_articles))
-
-    def save_bootstrapped_articles(self):
-        """保存已完成冷启动归档的文章 ID 集合"""
-        self._bootstrapped_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self._bootstrapped_path, "w", encoding="utf-8") as f:
-            json.dump(sorted(self._bootstrapped_articles), f)
 
     def load_comment_thread_map(self):
         """加载评论 ID → 线程根 ID 映射（Issue #3）"""
@@ -283,30 +263,30 @@ class BotRunner:
         with open(self._comment_thread_map_path, "w", encoding="utf-8") as f:
             json.dump(self._comment_thread_map, f, ensure_ascii=False)
 
-    def _get_thread_root_id(self, comment) -> str:
-        """确定评论所属对话线程的根 ID（Issue #3：修复多级回复归档）
+    def _get_thread_root_id(self, message) -> str:
+        """确定消息所属对话线程的根 ID
 
-        沿映射链迭代追溯到真正的根评论，并做路径压缩以提升后续查询效率。
+        沿映射链迭代追溯到真正的根消息，并做路径压缩以提升后续查询效率。
         内置循环检测防止坏数据导致死循环。
 
         Args:
-            comment: Comment 对象
+            message: Message 对象
 
         Returns:
-            线程根评论 ID（str）
+            线程根消息 ID（str）
         """
-        if comment.parent_id is None:
-            # 顶级评论，自身即为线程根
-            return comment.id
+        if message.parent_id is None:
+            # 顶级消息，自身即为线程根
+            return message.id
 
         # 从 parent_id 开始向上迭代追溯
-        current = comment.parent_id
+        current = message.parent_id
         visited: set[str] = set()
 
         while True:
             if current in visited:
                 # 坏数据导致循环，退出并以当前节点作为根
-                logger.warning("评论映射出现循环，comment_id=%s，以 %s 作为线程根", comment.id, current)
+                logger.warning("消息映射出现循环，message_id=%s，以 %s 作为线程根", message.id, current)
                 break
             visited.add(current)
 
@@ -323,21 +303,21 @@ class BotRunner:
 
         return current
 
-    def _make_root_comment_info(self, comment) -> dict:
-        """构建 get_or_create_thread 所需的 root_comment 字典（Issue #3）
+    def _make_root_comment_info(self, message) -> dict:
+        """构建 get_or_create_thread 所需的 root_comment 字典
 
-        当前评论是顶级评论时，用其实际作者信息；
-        当前评论是回复时，线程应已由顶级评论创建，仅传入 ID 即可。
+        当前消息是顶级消息时，用其实际作者信息；
+        当前消息是回复时，线程应已由顶级消息创建，仅传入 ID 即可。
 
         Args:
-            comment: Comment 对象
+            message: Message 对象
 
         Returns:
             包含 id 和 author 的字典
         """
-        thread_root_id = self._get_thread_root_id(comment)
-        # 仅顶级评论时才用真实作者，避免用回复者作者覆盖已有线程的元信息
-        author = comment.author if comment.parent_id is None else "unknown"
+        thread_root_id = self._get_thread_root_id(message)
+        # 仅顶级消息时才用真实作者，避免用回复者作者覆盖已有线程的元信息
+        author = message.author if message.parent_id is None else "unknown"
         return {"id": thread_root_id, "author": author}
 
     def _check_daily_limit(self) -> bool:
@@ -356,7 +336,7 @@ class BotRunner:
 
     def _write_pending(
         self,
-        article: dict,
+        topic: dict,
         comment_content: str,
         reply_content: str,
         comment_id: str,
@@ -365,27 +345,24 @@ class BotRunner:
         """将待审核回复写入 pending/ 目录
 
         Args:
-            article: 文章信息
-            comment_content: 原始评论
+            topic: 话题信息（id, title 等）
+            comment_content: 原始消息内容
             reply_content: 生成的回复
-            comment_id: 评论 ID
-            risk_reason: AI 风险评估理由
+            comment_id: 消息 ID
+            risk_reason: 备注理由
         """
         pending_dir = self.root / "data" / "pending"
         pending_dir.mkdir(parents=True, exist_ok=True)
 
-        filename = f"{article['id']}_{comment_id}.md"
+        topic_id = re.sub(r"[^\w\-]", "_", topic.get("id", "inbox"))
+        safe_comment_id = re.sub(r"[^\w\-]", "_", str(comment_id))
+        filename = f"{topic_id}_{safe_comment_id}.md"
         filepath = pending_dir / filename
 
-        object_type = article.get("type", "article")
-
-        # BUG-FIX: 使用 yaml.dump 生成 frontmatter，避免 article_title 或
-        # risk_reason 中含双引号时产生 YAML 解析错误，导致 approve_pending 静默失败。
-        # 参考: docs/实施记录/bug-fixes.md § BUG-FIX-02
+        # 使用 yaml.dump 生成 frontmatter，避免特殊字符导致 YAML 解析错误
         meta = {
-            "article_id": article["id"],
-            "article_title": article.get("title", ""),
-            "object_type": object_type,
+            "article_id": topic_id,
+            "article_title": topic.get("title", ""),
             "comment_id": comment_id,
             "generated_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
             "status": "pending",
@@ -397,7 +374,7 @@ class BotRunner:
             f"---\n"
             f"{meta_yaml}"
             f"---\n\n"
-            f"## 原始评论\n\n"
+            f"## 原始消息\n\n"
             f"> {comment_content}\n\n"
             f"## 生成的回复\n\n"
             f"{reply_content}\n"
@@ -408,97 +385,87 @@ class BotRunner:
 
         logger.info(f"待审核回复已写入: {filepath.name}")
 
-    def process_article(self, article: dict):
-        """处理单篇文章的评论
+    def process_messages(self, messages: list[Message], topic: dict = None):
+        """处理一批消息，通过 RAG/LLM 生成回复并写入 pending/ 目录
 
-        实施计划关联：AI-009 任务 3
-
-        流程：拉取评论 → 前置过滤 → RAG → LLM → pending/
+        流程：过滤已处理 → RAG → LLM → pending/
 
         Args:
-            article: 文章配置信息
+            messages: 消息列表
+            topic: 可选的话题元信息（id, title, url, content 等）
         """
-        if not self.zhihu_client:
-            logger.error("知乎客户端未初始化")
-            return
+        if topic is None:
+            topic = {}
 
-        article_id = article["id"]
-        object_type = article.get("type", "article")
-        article_meta = {
-            "title": article.get("title", ""),
-            "url": article.get("url", ""),
+        topic_id = topic.get("id", "inbox")
+        topic_meta = {
+            "title": topic.get("title", ""),
+            "url": topic.get("url", ""),
         }
 
-        logger.info(f"处理文章: {article.get('title', article_id)}")
+        logger.info(f"处理话题: {topic.get('title', topic_id)}")
 
-        # 拉取评论
-        comments = self.zhihu_client.get_comments(
-            object_id=article_id,
-            object_type=object_type,
-        )
-
-        # 过滤已处理的评论
-        new_comments = [
-            c for c in comments if c.id not in self._seen_ids
+        # 过滤已处理的消息
+        new_messages = [
+            m for m in messages if m.id not in self._seen_ids
         ]
 
-        if not new_comments:
-            logger.info(f"文章 {article_id}: 无新评论")
+        if not new_messages:
+            logger.info(f"话题 {topic_id}: 无新消息")
             return
 
-        logger.info(f"文章 {article_id}: 发现 {len(new_comments)} 条新评论")
+        logger.info(f"话题 {topic_id}: 发现 {len(new_messages)} 条新消息")
 
-        # 获取文章摘要（缓存）— 使用 LLM 生成简短摘要，便于 AI 理解上下文
-        # 不记录文章全文，只保留摘要
-        article_summary = ""
+        # 获取话题摘要（缓存）— 使用 LLM 生成简短摘要，便于 AI 理解上下文
+        topic_summary = ""
         if self.llm_client:
             try:
-                # 无正文时直接用标题（FIX-05），不浪费 API 调用
-                article_content = article.get("content", "")
-                article_title = article.get("title", "")
-                if not article_content:
-                    article_summary = article_title
+                # 无正文时直接用标题，不浪费 API 调用
+                topic_content = topic.get("content", "")
+                topic_title = topic.get("title", "")
+                if not topic_content:
+                    topic_summary = topic_title
                 else:
-                    article_summary = self.llm_client.summarize_article(
-                        title=article_title,
-                        content=article_content,
+                    topic_summary = self.llm_client.summarize_article(
+                        title=topic_title,
+                        content=topic_content,
                     )
             except Exception as e:
-                logger.warning(f"文章摘要生成失败: {e}")
+                logger.warning(f"话题摘要生成失败: {e}")
 
-        # 将摘要写入 article_meta，供线程管理器使用
-        article_meta["summary"] = article_summary
+        # 将摘要写入 topic_meta，供线程管理器使用
+        topic_meta["summary"] = topic_summary
 
-        # 本次 run 处理计数（FIX-16：实现 max_new_comments_per_run 上限）
+        # 本次 run 处理计数
         max_per_run = self.settings.get("bot", {}).get("max_new_comments_per_run", 0)
         run_processed = 0
 
-        for comment in new_comments:
+        for message in new_messages:
             if not self._check_daily_limit():
                 break
 
-            # 单次运行上限检查（FIX-16）
+            # 单次运行上限检查
             if max_per_run > 0 and run_processed >= max_per_run:
                 logger.info(
-                    "已达单次运行上限 %d 条，停止处理（FIX-16）", max_per_run
+                    "已达单次运行上限 %d 条，停止处理", max_per_run
                 )
                 break
 
             try:
-                self._process_single_comment(
-                    article=article,
-                    article_meta=article_meta,
-                    comment=comment,
-                    article_summary=article_summary,
+                self._process_single_message(
+                    topic=topic,
+                    topic_meta=topic_meta,
+                    message=message,
+                    topic_summary=topic_summary,
                 )
                 self._consecutive_failures = 0
-                run_processed += 1  # FIX-16
+                run_processed += 1
             except BudgetExceededError as e:
                 logger.warning(f"预算超限: {e}")
-                raise  # 向上传播，由 run_articles 处理告警
+                raise  # 向上传播，由 run_inbox 处理告警
             except Exception as e:
                 self._consecutive_failures += 1
-                logger.error(f"处理评论失败: {e}")
+                logger.error(f"处理消息失败: {e}")
 
                 fail_limit = self.settings.get("alerting", {}).get(
                     "consecutive_fail_limit", 3
@@ -512,66 +479,65 @@ class BotRunner:
                         )
                     break
 
-    def _process_single_comment(
+    def _process_single_message(
         self,
-        article: dict,
-        article_meta: dict,
-        comment,
-        article_summary: str,
+        topic: dict,
+        topic_meta: dict,
+        message: Message,
+        topic_summary: str,
     ):
-        """处理单条评论
+        """处理单条消息
 
         Args:
-            article: 文章配置
-            article_meta: 文章元信息
-            comment: Comment 对象
-            article_summary: 文章摘要
+            topic: 话题配置
+            topic_meta: 话题元信息
+            message: Message 对象
+            topic_summary: 话题摘要
         """
-        # 尽早更新评论线程映射（Issue #3）：无论该评论是否被过滤，都应记录其所属线程根，
-        # 确保后续的子评论/嵌套回复能通过映射找到正确的根评论。
-        thread_root_id = self._get_thread_root_id(comment)
-        self._comment_thread_map[comment.id] = thread_root_id
+        # 尽早更新消息线程映射：无论该消息是否被过滤，都应记录其所属线程根，
+        # 确保后续的子消息/嵌套回复能通过映射找到正确的根消息。
+        thread_root_id = self._get_thread_root_id(message)
+        self._comment_thread_map[message.id] = thread_root_id
 
-        # 检测真人回复 → 索引
-        # 参考 AI-013: 真人回复高权重索引
-        if comment.is_author_reply and self.rag_retriever:
-            self._handle_human_reply(article, article_meta, comment)
-            self._seen_ids.add(comment.id)
+        # 检测专家回复 → 索引
+        if message.is_author_reply and self.rag_retriever:
+            self._handle_expert_reply(topic, topic_meta, message)
+            self._seen_ids.add(message.id)
             return
 
         # 白名单用户：仅记录到线程，不做 AI 处理
         whitelist = self.settings.get("bot", {}).get("whitelist_users", [])
-        if comment.author in whitelist:
-            self._handle_whitelist_comment(article, article_meta, comment)
-            self._seen_ids.add(comment.id)
+        if message.author in whitelist:
+            self._handle_whitelist_message(topic, topic_meta, message)
+            self._seen_ids.add(message.id)
             return
 
         # 前置过滤
         comment_dict = {
-            "content": comment.content,
-            "author": comment.author,
-            "created_time": comment.created_time,
+            "content": message.content,
+            "author": message.author,
+            "created_time": message.created_time,
         }
 
         if self.comment_filter:
             skip, reason = self.comment_filter.should_skip(comment_dict)
             if skip:
-                logger.info(f"跳过评论 {comment.id}: {reason}")
+                logger.info(f"跳过消息 {message.id}: {reason}")
                 # 即使被过滤，也记录到对话线程以备后期学习
                 if self.thread_manager:
                     _skip_thread_path = self.thread_manager.get_or_create_thread(
-                        article_id=article["id"],
-                        root_comment=self._make_root_comment_info(comment),
-                        article_meta=article_meta,
+                        article_id=topic.get("id", "inbox"),
+                        root_comment=self._make_root_comment_info(message),
+                        article_meta=topic_meta,
                     )
                     self.thread_manager.append_turn(
                         thread_path=_skip_thread_path,
-                        author=comment.author,
-                        content=comment.content,
-                        comment_id=comment.id,
-                        is_followup=comment.parent_id is not None,
+                        author=message.author,
+                        content=message.content,
+                        comment_id=message.id,
+                        is_followup=message.parent_id is not None,
                     )
-                self._seen_ids.add(comment.id)
+                self._seen_ids.add(message.id)
                 return
 
             # 超长截断
@@ -579,8 +545,7 @@ class BotRunner:
                 self.comment_filter.truncate_if_needed(comment_dict["content"])
             )
 
-        # 按评论内容检索 Wiki 上下文（FIX-02：每条评论独立检索，不复用文章标题）
-        # 参考: docs/plan/README.md § 流程图 "RAG 检索"节点在单条评论路径上
+        # 按消息内容检索 Wiki 上下文（每条消息独立检索）
         context_chunks: list[str] = []
         if self.rag_retriever:
             context_chunks = self.rag_retriever.retrieve(
@@ -591,24 +556,23 @@ class BotRunner:
                 ),
             )
 
-        # 构建线程和历史上下文（Issue #3：使用正确的线程根 ID）
-        # thread_root_id 已在函数开头计算并存入映射
+        # 构建线程和历史上下文
         history_messages = []
-        thread_path = None  # FIX-15：初始化为 None，后续复用
+        thread_path = None
         if self.thread_manager:
             thread_path = self.thread_manager.get_or_create_thread(
-                article_id=article["id"],
-                root_comment=self._make_root_comment_info(comment),
-                article_meta=article_meta,
+                article_id=topic.get("id", "inbox"),
+                root_comment=self._make_root_comment_info(message),
+                article_meta=topic_meta,
             )
 
-            # 追加用户评论
+            # 追加用户消息
             self.thread_manager.append_turn(
                 thread_path=thread_path,
-                author=comment.author,
-                content=comment.content,
-                comment_id=comment.id,
-                is_followup=comment.parent_id is not None,
+                author=message.author,
+                content=message.content,
+                comment_id=message.id,
+                is_followup=message.parent_id is not None,
             )
 
             # 获取历史上下文
@@ -621,7 +585,6 @@ class BotRunner:
         reply_content = ""
         total_tokens = 0
         if self.llm_client:
-            # 记录调用前的累计值，用于计算增量
             prev_prompt = self.llm_client.total_prompt_tokens
             prev_completion = self.llm_client.total_completion_tokens
             prev_cache = self.llm_client.total_cache_hit_tokens
@@ -630,7 +593,7 @@ class BotRunner:
             reply_content, total_tokens = self.llm_client.generate_reply(
                 comment=comment_dict["content"],
                 context_chunks=context_chunks,
-                article_summary=article_summary,
+                article_summary=topic_summary,
                 history_messages=history_messages[:-1] if history_messages else None,
             )
 
@@ -639,7 +602,6 @@ class BotRunner:
             if reply_content and reply_prefix:
                 reply_content = f"{reply_prefix}: {reply_content}"
 
-            # 记录增量费用（而非累计值）
             if self.cost_tracker:
                 self.cost_tracker.record(
                     model=self.llm_client.model,
@@ -649,7 +611,7 @@ class BotRunner:
                     usd_cost=self.llm_client.total_cost_usd - prev_cost,
                 )
 
-        # 追加 Bot 回复到线程（FIX-15：直接复用已有 thread_path，不再重复调用 get_or_create_thread）
+        # 追加 Bot 回复到线程
         if self.thread_manager and reply_content and thread_path:
             self.thread_manager.append_turn(
                 thread_path=thread_path,
@@ -659,95 +621,47 @@ class BotRunner:
                 tokens=total_tokens,
             )
 
-        # AI 风险评估：决定自动发布或写入 pending/
-        if self.llm_client and reply_content and self.zhihu_client:
-            risk_level, risk_reason = self.llm_client.assess_risk(
-                comment=comment_dict["content"],
-                reply=reply_content,
-            )
-
-            if risk_level == "safe":
-                # CSM/LabVIEW 相关明确回复 → 自动发布
-                object_type = article.get("type", "article")
-                # ZhihuClient.post_comment() 约定 article/answer；
-                # 配置中的 question 在发布前映射为 answer
-                post_type = "answer" if object_type == "question" else object_type
-
-                success = self.zhihu_client.post_comment(
-                    object_id=article["id"],
-                    object_type=post_type,
-                    content=reply_content,
-                    parent_id=comment.id,
-                )
-                if success:
-                    # 发布成功后才将 QA 对索引到 RAG（FIX-06）
-                    # 避免未发布/被拒回复污染检索结果
-                    if self.rag_retriever:
-                        try:
-                            self.rag_retriever.index_human_reply(
-                                question=comment_dict["content"],
-                                reply=reply_content,
-                                article_id=article["id"],
-                                thread_id=comment.parent_id or comment.id,
-                            )
-                        except Exception as e:
-                            logger.warning("Bot 回复索引到 RAG 失败: %s", e)
-                else:
-                    # 发布失败，回退到 pending/
-                    self._write_pending(
-                        article=article,
-                        comment_content=comment.content,
-                        reply_content=reply_content,
-                        comment_id=comment.id,
-                        risk_reason="发布失败，自动转入人工审核",
-                    )
-            else:
-                # 高危回复 → 写入 pending/ 等待人工审核
-                self._write_pending(
-                    article=article,
-                    comment_content=comment.content,
-                    reply_content=reply_content,
-                    comment_id=comment.id,
-                    risk_reason=risk_reason,
-                )
-        elif reply_content:
-            # 无 zhihu_client（如测试环境）→ 写入 pending/
+        # 写入 pending/ 等待人工审核，并索引到 RAG
+        if reply_content:
             self._write_pending(
-                article=article,
-                comment_content=comment.content,
+                topic=topic,
+                comment_content=message.content,
                 reply_content=reply_content,
-                comment_id=comment.id,
+                comment_id=message.id,
             )
+            if self.rag_retriever:
+                try:
+                    self.rag_retriever.index_human_reply(
+                        question=comment_dict["content"],
+                        reply=reply_content,
+                        article_id=topic.get("id", "inbox"),
+                        thread_id=message.parent_id or message.id,
+                    )
+                except Exception as e:
+                    logger.warning("Bot 回复索引到 RAG 失败: %s", e)
 
-        self._seen_ids.add(comment.id)
+        self._seen_ids.add(message.id)
         self._processed_count += 1
 
-    def _handle_human_reply(self, article: dict, article_meta: dict, comment):
-        """处理作者真人回复
+    def _handle_expert_reply(self, topic: dict, topic_meta: dict, message: Message):
+        """处理专家/维护者的权威回复
 
-        实施计划关联：AI-013 真人回复高权重索引
-
-        检测到 is_author_reply=True 的评论时，
+        检测到 is_author_reply=True 的消息时，
         找到对应 thread，提取 QA 对，索引到 reply_index。
         """
-        logger.info(f"检测到真人回复: comment_id={comment.id}")
+        logger.info(f"检测到专家回复: message_id={message.id}")
+
+        topic_id = topic.get("id", "inbox")
 
         if self.thread_manager:
-            # thread_root_id 已在 _process_single_comment 开头通过映射确定
             thread_path = self.thread_manager.get_or_create_thread(
-                article_id=article["id"],
-                root_comment=self._make_root_comment_info(comment),
-                article_meta={
-                    "title": article.get("title", ""),
-                    "url": article.get("url", ""),
-                },
+                article_id=topic_id,
+                root_comment=self._make_root_comment_info(message),
+                article_meta=topic_meta,
             )
 
-            # 从历史中找最近一条 role=="user" 的内容作为 question。
-            # _parse_turns 将"真人回复"映射为 assistant role，因此即使历史中存在
-            # 多条真人回复，reversed 搜索仍能跳过它们，正确取到用户的原始提问。
-            # 参考: docs/实施记录/bug-fixes.md § BUG-FIX-01
-            question_for_rag = "用户评论"  # 默认值
+            # 从历史中找最近一条 role=="user" 的内容作为 question
+            question_for_rag = "用户消息"  # 默认值
             if self.rag_retriever:
                 messages = self.thread_manager.build_context_messages(
                     thread_path, max_turns=6
@@ -757,272 +671,139 @@ class BotRunner:
                         question_for_rag = msg.get("content", question_for_rag)
                         break
 
-            # 追加真人回复（带 ⭐ 标记）
+            # 追加专家回复（带 ⭐ 标记）
             self.thread_manager.append_turn(
                 thread_path=thread_path,
-                author=comment.author,
-                content=comment.content,
-                comment_id=comment.id,
+                author=message.author,
+                content=message.content,
+                comment_id=message.id,
                 is_human=True,
             )
 
         # 索引到 reply_index
         if self.rag_retriever:
-            # question_for_rag 在上方 thread_manager 块中已从历史提取
-            # 若 thread_manager 为 None，使用默认值
             if not self.thread_manager:
-                question_for_rag = "用户评论"
+                question_for_rag = "用户消息"
 
             self.rag_retriever.index_human_reply(
                 question=question_for_rag,
-                reply=comment.content,
-                article_id=article["id"],
-                thread_id=self._get_thread_root_id(comment),
+                reply=message.content,
+                article_id=topic_id,
+                thread_id=self._get_thread_root_id(message),
             )
 
-    def _handle_whitelist_comment(self, article: dict, article_meta: dict, comment):
-        """处理白名单用户的评论
+    def _handle_whitelist_message(self, topic: dict, topic_meta: dict, message: Message):
+        """处理白名单用户的消息
 
-        白名单用户（维护者等）的回复仅记录到对话线程和 RAG，
+        白名单用户（维护者等）的消息仅记录到对话线程和 RAG，
         不触发 AI 生成回复，节省 token。
 
         Args:
-            article: 文章配置
-            article_meta: 文章元信息
-            comment: Comment 对象
+            topic: 话题配置
+            topic_meta: 话题元信息
+            message: Message 对象
         """
         logger.info(
-            "白名单用户 %s 的评论，仅记录: comment_id=%s",
-            comment.author, comment.id,
+            "白名单用户 %s 的消息，仅记录: message_id=%s",
+            message.author, message.id,
         )
 
-        # 记录到对话线程（Issue #3：thread_root_id 已在 _process_single_comment 开头确定）
+        # 记录到对话线程
+        topic_id = topic.get("id", "inbox")
         if self.thread_manager:
             thread_path = self.thread_manager.get_or_create_thread(
-                article_id=article["id"],
-                root_comment=self._make_root_comment_info(comment),
-                article_meta=article_meta,
+                article_id=topic_id,
+                root_comment=self._make_root_comment_info(message),
+                article_meta=topic_meta,
             )
             self.thread_manager.append_turn(
                 thread_path=thread_path,
-                author=comment.author,
-                content=comment.content,
-                comment_id=comment.id,
+                author=message.author,
+                content=message.content,
+                comment_id=message.id,
             )
 
         # 索引到 RAG 供后续检索
         if self.rag_retriever:
             self.rag_retriever.index_human_reply(
-                question=comment.content,
-                reply=comment.content,
-                article_id=article["id"],
-                thread_id=self._get_thread_root_id(comment),
+                question=message.content,
+                reply=message.content,
+                article_id=topic_id,
+                thread_id=self._get_thread_root_id(message),
             )
 
-    def _expand_articles(self) -> list[dict]:
-        """展开 column/user_answers/question 类型为具体的文章/回答列表
+    def _read_inbox(self) -> list[Message]:
+        """读取收件箱目录中的待处理消息
 
-        将 articles 配置中的 column、user_answers 和 question 类型自动展开
-        为对应的 article/answer 类型条目。
-
-        - question 类型：通过 API 获取该问题下所有回答的 answer_id，
-          后续用正确的 answer_id 读写评论（FIX-01）
+        从 data/inbox/ 目录读取 JSON 格式的消息文件。
+        每个文件应包含字段: id, content, author, created_time, parent_id, is_author_reply。
 
         Returns:
-            展开后的文章列表
+            消息列表（按文件名排序）
         """
-        expanded = []
-        for article in self.articles:
-            article_type = article.get("type", "article")
+        inbox_dir = self.root / "data" / "inbox"
+        if not inbox_dir.exists():
+            logger.info("收件箱目录不存在: %s", inbox_dir)
+            return []
 
-            if article_type in ("article", "answer"):
-                expanded.append(article)
-            elif article_type == "question" and self.zhihu_client:
-                # 展开问题：获取问题下所有回答的 answer_id
-                # 参考 FIX-01: question_id ≠ answer_id，需先解析
-                try:
-                    answers = self.zhihu_client.get_question_answers(
-                        article["id"]
-                    )
-                    # 继承文章配置中的 title/url（若 API 未返回）
-                    for ans in answers:
-                        ans.setdefault("title", article.get("title", ""))
-                        ans.setdefault("url", article.get("url", ""))
-                    expanded.extend(answers)
-                    logger.info(
-                        "问题 %s 展开为 %d 个回答",
-                        article["id"], len(answers),
-                    )
-                except (ZhihuAuthError, ZhihuRateLimitError):
-                    raise
-                except Exception as e:
-                    logger.warning("展开问题 %s 失败: %s", article["id"], e)
-            elif article_type == "column" and self.zhihu_client:
-                # 展开专栏：获取专栏下全部文章
-                try:
-                    column_articles = self.zhihu_client.get_column_articles(
-                        article["id"]
-                    )
-                    expanded.extend(column_articles)
-                    logger.info(
-                        "专栏 %s 展开为 %d 篇文章",
-                        article["id"], len(column_articles),
-                    )
-                except (ZhihuAuthError, ZhihuRateLimitError):
-                    raise
-                except Exception as e:
-                    logger.warning("展开专栏 %s 失败: %s", article["id"], e)
-            elif article_type == "user_answers" and self.zhihu_client:
-                # 展开用户回答：获取某人全部回答
-                try:
-                    user_answers = self.zhihu_client.get_user_answers(
-                        article["id"]
-                    )
-                    expanded.extend(user_answers)
-                    logger.info(
-                        "用户 %s 展开为 %d 个回答",
-                        article["id"], len(user_answers),
-                    )
-                except (ZhihuAuthError, ZhihuRateLimitError):
-                    raise
-                except Exception as e:
-                    logger.warning("展开用户 %s 回答失败: %s", article["id"], e)
-            else:
-                expanded.append(article)
-
-        return expanded
-
-    def _bootstrap_article(self, article: dict):
-        """冷启动归档：首次监控该文章时将所有现存评论标记为已见，不生成回复
-        参考: Issue #1 — 避免对历史评论重复回复
-
-        Args:
-            article: 文章配置信息
-        """
-        if not self.zhihu_client:
-            return
-
-        article_id = article["id"]
-        object_type = article.get("type", "article")
-
-        try:
-            comments = self.zhihu_client.get_comments(
-                object_id=article_id,
-                object_type=object_type,
-            )
-        except (ZhihuAuthError, ZhihuRateLimitError):
-            # 认证失败或限流时，向上传播，让 run_articles 处理告警
-            # 不标记为已归档，下次运行时重试
-            raise
-        except Exception as e:
-            logger.warning("冷启动获取文章 %s 评论失败: %s，跳过本次冷启动", article_id, e)
-            # 注意：故意不加入 _bootstrapped_articles，下次运行继续重试冷启动
-            return
-
-        new_ids = {c.id for c in comments if c.id not in self._seen_ids}
-        if new_ids:
-            logger.info(
-                "文章 %s 冷启动归档 %d 条历史评论（不回复）",
-                article_id, len(new_ids),
-            )
-            self._seen_ids.update(new_ids)
-        else:
-            logger.info("文章 %s 冷启动：无需归档（无新评论）", article_id)
-
-        # 仅在成功完成归档后才标记，保证下次运行时可以正常进入回复流程
-        self._bootstrapped_articles.add(article_id)
-
-    def run_articles(self):
-        """处理所有文章（可单独调用，便于测试）
-
-        先展开 column/user_answers 类型，再逐篇处理评论。
-        未完成冷启动归档的文章先归档再处理（Issue #1）。
-        捕获认证/限流/预算异常并触发告警。
-        """
-        # 展开 column/user_answers 为具体的文章/回答
-        try:
-            articles_to_process = self._expand_articles()
-        except ZhihuAuthError as e:
-            logger.error("展开监控目标时认证失败: %s", e)
-            if self.alert_manager:
-                self.alert_manager.alert_cookie_expired(e.status_code)
-            return
-        except ZhihuRateLimitError as e:
-            logger.error("展开监控目标时限流: %s", e)
-            if self.alert_manager:
-                self.alert_manager.alert_rate_limited()
-            return
-
-        if not articles_to_process and self.articles:
-            logger.error(
-                "展开后监控目标为空（配置了 %d 个），所有目标均展开失败",
-                len(self.articles),
-            )
-            if self.alert_manager:
-                self.alert_manager.alert_expansion_failed(
-                    configured_count=len(self.articles),
-                    recent_logs=self._log_handler.format_markdown(50),
-                )
-            return
-
-        logger.info("展开后共 %d 个监控目标", len(articles_to_process))
-
-        for article in articles_to_process:
-            if not self._check_daily_limit():
-                break
-
-            # 冷启动归档（Issue #1）：首次监控时归档历史评论，不回复
-            if article["id"] not in self._bootstrapped_articles:
-                try:
-                    self._bootstrap_article(article)
-                except ZhihuAuthError as e:
-                    logger.error(f"冷启动归档认证失败: {e}")
-                    if self.alert_manager:
-                        self.alert_manager.alert_cookie_expired(e.status_code)
-                    break
-                except ZhihuRateLimitError as e:
-                    logger.error(f"冷启动归档限流: {e}")
-                    if self.alert_manager:
-                        self.alert_manager.alert_rate_limited()
-                    break
-                continue  # 本次 run 跳过正式处理，下次 run 再回复新评论
-
+        messages: list[Message] = []
+        for json_file in sorted(inbox_dir.glob("*.json")):
             try:
-                self.process_article(article)
-            except ZhihuAuthError as e:
-                logger.error(f"知乎认证失败: {e}")
-                if self.alert_manager:
-                    self.alert_manager.alert_cookie_expired(e.status_code)
-                break
-            except ZhihuRateLimitError as e:
-                logger.error(f"知乎限流: {e}")
-                if self.alert_manager:
-                    self.alert_manager.alert_rate_limited()
-                break
-            except BudgetExceededError as e:
-                logger.warning(f"预算超限，终止处理: {e}")
-                if self.alert_manager:
-                    self.alert_manager.alert_budget_exceeded(
-                        cost=self.llm_client.total_cost_usd if self.llm_client else 0,
-                        budget=self.settings["bot"]["llm_budget_usd_per_day"],
-                    )
-                break
+                with open(json_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                raw_parent = data.get("parent_id")
+                message = Message(
+                    id=str(data["id"]),
+                    content=str(data["content"]),
+                    author=str(data.get("author", "anonymous")),
+                    created_time=int(data.get("created_time", 0)),
+                    parent_id=str(raw_parent) if raw_parent is not None else None,
+                    is_author_reply=bool(data.get("is_author_reply", False)),
+                )
+                messages.append(message)
+            except Exception as e:
+                logger.warning("读取收件箱文件失败: %s - %s", json_file.name, e)
+
+        logger.info("从收件箱读取 %d 条消息", len(messages))
+        return messages
+
+    def run_inbox(self):
+        """处理收件箱消息（可单独调用，便于测试）
+
+        读取 data/inbox/ 目录中的消息，通过 RAG/LLM 生成回复并写入 pending/。
+        捕获预算超限异常并触发告警。
+        """
+        messages = self._read_inbox()
+
+        if not messages:
+            logger.info("收件箱为空，无需处理")
+            return
+
+        logger.info("共 %d 条收件箱消息待处理", len(messages))
+
+        try:
+            self.process_messages(messages)
+        except BudgetExceededError as e:
+            logger.warning(f"预算超限，终止处理: {e}")
+            if self.alert_manager:
+                self.alert_manager.alert_budget_exceeded(
+                    cost=self.llm_client.total_cost_usd if self.llm_client else 0,
+                    budget=self.settings["bot"]["llm_budget_usd_per_day"],
+                )
 
     def run(self):
         """执行主流程
-
-        实施计划关联：AI-009
 
         完整流程：
         1. 加载配置
         2. 初始化模块
         3. 同步 Wiki
         4. 加载已处理 ID
-        5. 处理每篇文章
+        5. 处理收件箱消息
         6. 保存状态
         7. 输出费用报告
         """
-        logger.info("=== 知乎 CSM 自动回复机器人启动 ===")
+        logger.info("=== CSM RAG/LLM 问答机器人启动 ===")
 
         try:
             self.load_config()
@@ -1036,17 +817,14 @@ class BotRunner:
                     logger.warning(f"Wiki 同步失败（不影响主流程）: {e}")
 
             self.load_seen_ids()
-            self.load_bootstrapped_articles()
             self.load_comment_thread_map()
 
-            # 处理每篇文章
-            self.run_articles()
+            # 处理收件箱消息
+            self.run_inbox()
 
             # 保存状态
             self.save_seen_ids()
-            self.save_bootstrapped_articles()
             self.save_comment_thread_map()
-            # 持久化 dedup 缓存（FIX-04）
             if self.comment_filter:
                 self.comment_filter.save_dedup_cache()
 
@@ -1060,7 +838,7 @@ class BotRunner:
                 self.alert_manager.record_health("ok")
 
             logger.info(
-                f"=== 运行完成: 处理 {self._processed_count} 条评论 ==="
+                f"=== 运行完成: 处理 {self._processed_count} 条消息 ==="
             )
 
         except Exception as e:

@@ -94,7 +94,6 @@ class TestBotWorkflow:
     def test_secrets_referenced(self, workflow: dict):
         """应引用必要的 Secrets"""
         workflow_str = yaml.dump(workflow)
-        assert "ZHIHU_COOKIE" in workflow_str, "缺少 ZHIHU_COOKIE 引用"
         assert "LLM_API_KEY" in workflow_str, "缺少 LLM_API_KEY 引用"
         assert "GITHUB_TOKEN" in workflow_str, "缺少 GITHUB_TOKEN 引用"
 

@@ -4,7 +4,7 @@
 
 功能：
 - list_pending(): 列出 pending/ 目录下待审核的回复文件
-- approve_pending(): 审核通过并发布
+- approve_pending(): 审核通过并归档
 - reject_pending(): 拒绝并归档
 """
 
@@ -12,22 +12,8 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Optional
-
-import frontmatter
 
 logger = logging.getLogger(__name__)
-
-
-def _map_object_type(object_type: str) -> str:
-    """将配置中的 object_type 映射为知乎 API 接受的类型
-
-    ZhihuClient.post_comment() 约定使用 article/answer；
-    配置中的 question 在发布前映射为 answer。
-    """
-    if object_type == "question":
-        return "answer"
-    return object_type
 
 
 def list_pending(pending_dir: str) -> list[Path]:
@@ -49,44 +35,18 @@ def list_pending(pending_dir: str) -> list[Path]:
     return files
 
 
-def approve_pending(filepath: Path, zhihu_client=None) -> bool:
+def approve_pending(filepath: Path) -> bool:
     """
-    审核通过：发布评论并移动到已处理目录
+    审核通过：移动到已完成目录
 
     Args:
         filepath: pending 文件路径
-        zhihu_client: 知乎客户端（None 时跳过发布）
 
     Returns:
         True 表示处理成功
     """
     try:
-        post = frontmatter.load(str(filepath))
-        meta = post.metadata
-
-        if zhihu_client and meta.get("status") == "pending":
-            # 解析回复内容（"## 生成的回复" 之后的内容）
-            content = post.content
-            reply_start = content.find("## 生成的回复")
-            if reply_start >= 0:
-                reply_text = content[reply_start + len("## 生成的回复"):].strip()
-            else:
-                reply_text = content.strip()
-
-            success = zhihu_client.post_comment(
-                meta.get("article_id", ""),
-                # 从 pending 元数据中读取 object_type；
-                # question 在发布时映射为 answer
-                _map_object_type(meta.get("object_type", "article")),
-                reply_text,
-                parent_id=meta.get("comment_id"),
-            )
-
-            if not success:
-                logger.warning("发布失败: %s", filepath.name)
-                return False
-
-        # 移动到已完成目录（FIX-19：改为 data/done/，与线程归档目录分离）
+        # 移动到已完成目录（data/done/，与线程归档目录分离）
         # 从 pending 文件所在路径推算 data/ 根目录：
         # pending 文件在 data/pending/ 目录下
         done_dir = filepath.parent.parent / "done"
