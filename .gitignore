@@ -5,6 +5,13 @@
 data/vector_store/
 data/reply_index/
 
+# 运行时数据（不提交到 git）
+archive/articles/
+archive/rejected/
+data/seen_ids.json
+data/comment_thread_map.json
+data/dedup_cache.json
+
 # 环境变量
 .env
 
