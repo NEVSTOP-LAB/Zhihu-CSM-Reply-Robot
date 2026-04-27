@@ -2,6 +2,9 @@
 .csm_qa/
 data/vector_store/
 
+# wiki 本地克隆（仅保留 wiki_source.json，不提交内容文件）
+csm-wiki/remote/
+
 # 环境变量
 .env
 

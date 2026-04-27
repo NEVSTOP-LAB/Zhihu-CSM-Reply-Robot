@@ -47,7 +47,7 @@ class CSM_QA:
         max_tokens: 单次回复的 token 上限。
         max_retries: LLM 调用重试次数。
         request_timeout: 单次 LLM 请求超时（秒）。
-        wiki_dir: 知识库目录，默认 ``"csm-wiki"``。
+        wiki_dir: 知识库目录，默认 ``"csm-wiki/remote"``。
         vector_store_dir: 向量库持久化目录，默认 ``".csm_qa/vector_store"``。
         embedding_provider: ``"local"`` 或 ``"openai"``。
         embedding_model: embedding 模型名（local 默认 BAAI/bge-small-zh-v1.5）。
@@ -70,7 +70,7 @@ class CSM_QA:
         max_tokens: int = 512,
         max_retries: int = 3,
         request_timeout: float = 60.0,
-        wiki_dir: str | Path = "csm-wiki",
+        wiki_dir: str | Path = "csm-wiki/remote",
         vector_store_dir: str | Path = ".csm_qa/vector_store",
         embedding_provider: EmbeddingProvider = "local",
         embedding_model: str = "BAAI/bge-small-zh-v1.5",
