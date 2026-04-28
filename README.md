@@ -2,8 +2,6 @@
 
 > 通用 RAG 问答 Python 库 —— 基于 CSM Wiki / LabVIEW 知识库，封装 LLM 调用与向量检索，对外仅暴露一个简洁的 `CSM_QA` 类。
 
-本仓库经过一次大胆重构，从"知乎评论批处理机器人"演进为可被任意 Python 项目 `import` 使用的 **RAG 问答 SDK**。原有的 inbox/pending 文件流、知乎客户端、定时 Workflow 等均已移除。
-
 ---
 
 ## 安装
@@ -166,7 +164,7 @@ qa = CSM_QA(api_key="sk", system_prompt="You are a helpful general-purpose assis
 │   ├── basic_usage.py
 │   └── multi_turn.py
 ├── tests/                  # 单元测试
-├── docs/                   # 历史调研与设计文档（仅参考，非运行时依赖）
+├── docs/                   # 调研与设计文档（仅参考，非运行时依赖）
 ├── pyproject.toml
 └── requirements.txt
 ```

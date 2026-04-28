@@ -12,26 +12,26 @@
 
 | 需求 | 挑战 |
 |------|------|
-| 每次回复都能参考最新 CSM Wiki | Wiki 更新后需同步到检索库 |
+| 每次回答都能参考最新 CSM Wiki | Wiki 更新后需同步到检索库 |
 | 不全量灌入 Prompt | Token 消耗巨大，且超出上下文窗口 |
-| 回复质量高 | 检索要精准，避免引入无关内容 |
+| 回答质量高 | 检索要精准，避免引入无关内容 |
 
 ## 2. RAG 架构总览
 
 ```
-CSM Wiki (Markdown 文件)
-    │ 定期同步（GitHub Actions cron）
+CSM Wiki (Markdown 文件，存放于 csm-wiki/remote/)
+    │ 增量同步（python -m csm_qa.sync_wiki）
     ▼
 文档分块（Chunking）
     │
     ▼
-Embedding 生成（text-embedding-3-small）
+Embedding 生成（BAAI/bge-small-zh-v1.5 本地 或 OpenAI text-embedding-*）
     │
     ▼
-向量存储（ChromaDB / FAISS）← 保存在 data/vector_store/
+向量存储（ChromaDB）← 保存在 .csm_qa/vector_store/
     │
     ▼
-查询时：评论 → Embedding → Top-K 相似片段 → 注入 Prompt
+查询时：用户问题 → Embedding → Top-K 相似片段 → 注入 Prompt
 ```
 
 ## 3. 向量库选型
@@ -98,7 +98,6 @@ def sync_wiki(wiki_dir: str, vectorstore: Chroma):
 关键点：
 - 只对**变更文件**重新 embedding（节省 API 费用）
 - 新增/删除文件均处理
-- `wiki_hash.json` 和向量库一起 git commit
 
 参考：[How to Update RAG Knowledge Base Without Rebuilding Everything](https://particula.tech/blog/update-rag-knowledge-without-rebuilding)
 
@@ -112,14 +111,21 @@ def retrieve_context(query: str, k: int = 3) -> list[str]:
 
 - `k=3` 约 900–1500 tokens，足够提供上下文又不过载
 - 可加 **reranker**（如 `cross-encoder/ms-marco-MiniLM-L-6-v2`）提升精度，但需权衡延迟
+- 默认相似度阈值 `0.72`，过滤低相关性片段
 
-## 8. Wiki 更新频率建议
+## 8. Wiki 更新方式
 
-| Wiki 更新频率 | 同步策略 |
-|---------------|---------|
-| 偶尔更新（月级） | 手动触发 `workflow_dispatch` 重建 |
-| 定期更新（周级） | 每周日专用 `sync-wiki` workflow |
-| 高频更新 | Wiki 仓库 push 事件触发同步（webhook） |
+```bash
+python -m csm_qa.sync_wiki                 # 增量同步
+python -m csm_qa.sync_wiki --force         # 强制重建
+python -m csm_qa.sync_wiki --remote        # 检查远程并按需拉取
+```
+
+或在代码中：
+
+```python
+qa.sync_wiki(force=False)
+```
 
 ## 9. RAG vs Skill（Function Calling）方案对比
 
@@ -142,21 +148,10 @@ def retrieve_context(query: str, k: int = 3) -> list[str]:
 | **工程复杂度** | 中（向量库 + embedding） | 高（函数设计、错误处理、安全） |
 | **CSM Wiki 适用性** | ✅ 高度适合 | ❌ 过度设计（知识是静态文档） |
 
-### 9.3 Skill 的适用场景（何时考虑）
+### 9.3 结论
 
-本项目中，以下场景可以考虑引入 Skill/Function Calling：
-- 查询某客户的合同状态（需访问外部 CRM）
-- 获取产品最新版本信息（需实时查询）
-- 自动创建工单（执行动作）
-
-**但 CSM Wiki 是相对稳定的规范文档**，不需要实时查询，RAG 完全满足需求。
-
-### 9.4 结论与推荐
-
-```
-CSM Wiki 知识检索 → 使用 RAG（本文档其余部分详述）
-未来扩展实时查询 → 可叠加 Function Calling（不影响 RAG 层）
-```
+**CSM Wiki 是相对稳定的规范文档**，不需要实时查询，RAG 完全满足需求。  
+未来如需扩展实时查询能力，可叠加 Function Calling，不影响 RAG 层。
 
 > 参考：[RAG vs Function Calling (getstream.io)](https://getstream.io/blog/rag-function-calling/) | [RAG, Tool Calling, Function Calling: Boundaries & Patterns](https://jit.pro/blog/rag-tool-calling-function-calling-boundaries-patterns)
 
