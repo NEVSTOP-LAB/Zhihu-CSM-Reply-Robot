@@ -111,7 +111,9 @@ class EmbeddingFunction:
 
         self._local_model_error = last_exc
         logger.warning("本地 Embedding 模型初始化失败，所有端点均不可用，已停止后续重试")
-        raise RuntimeError("本地 Embedding 模型初始化失败，所有端点均不可用") from last_exc
+        raise RuntimeError(
+            f"本地 Embedding 模型初始化失败，所有端点均不可用: {candidates}"
+        ) from last_exc
 
     def _get_online_client(self):
         if self._online_client is None:

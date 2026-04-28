@@ -165,7 +165,11 @@ def resolve_qa_category_id(client: GitHubGraphQL, owner: str, repo: str) -> str:
 def fetch_discussion(
     client: GitHubGraphQL, owner: str, repo: str, number: int
 ) -> dict[str, Any]:
-    """拉取指定 discussion 的详情（含前 100 条评论）。"""
+    """拉取指定 discussion 的详情（含前 100 条评论）。
+
+    注意：每次最多拉取 100 条评论。若 discussion 评论数超过 100，
+    超出部分不会被检查，可能导致已有 Bot 回复未被检测到（重复回复）。
+    """
     gql = """
     query($owner: String!, $repo: String!, $number: Int!) {
       repository(owner: $owner, name: $repo) {
