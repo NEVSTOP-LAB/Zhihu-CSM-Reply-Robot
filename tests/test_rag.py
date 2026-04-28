@@ -140,3 +140,17 @@ def test_retrieve_empty_query_returns_empty(retriever: RAGRetriever):
     retriever.sync_wiki()
     assert retriever.retrieve("") == []
     assert retriever.retrieve("   ") == []
+
+
+def test_retrieve_embedding_failure_returns_empty(retriever: RAGRetriever):
+    """embedding 调用抛出异常时 retrieve 应返回空列表而非向上传播。"""
+    _write(retriever.wiki_dir / "a.md", "# A\ncontent")
+    retriever.sync_wiki()
+
+    class BrokenEmbedding(FakeEmbedding):
+        def embed(self, texts):
+            raise RuntimeError("模型加载失败")
+
+    retriever.embedding_fn = BrokenEmbedding()
+    result = retriever.retrieve("content")
+    assert result == []

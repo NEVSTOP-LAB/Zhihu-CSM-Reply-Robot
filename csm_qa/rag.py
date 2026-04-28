@@ -52,17 +52,14 @@ class EmbeddingFunction:
             from sentence_transformers import SentenceTransformer
 
             # HF_ENDPOINT 为空字符串会导致 huggingface_hub 构造无协议前缀的 URL。
-            # 清理空值并默认使用国内镜像站，避免 huggingface.co 不可访问时下载失败。
+            # 默认使用国内镜像站，避免 huggingface.co 不可访问时下载失败。
             # 如需使用官方源，可通过环境变量显式设置 HF_ENDPOINT=https://huggingface.co。
             if not os.environ.get("HF_ENDPOINT", "").strip():
-                os.environ.pop("HF_ENDPOINT", None)
+                os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
                 try:
                     import huggingface_hub.constants as _hf_constants
 
-                    if not getattr(_hf_constants, "ENDPOINT", "").startswith(
-                        ("http://", "https://")
-                    ):
-                        _hf_constants.ENDPOINT = "https://hf-mirror.com"
+                    _hf_constants.ENDPOINT = "https://hf-mirror.com"
                 except Exception:
                     pass
 
@@ -318,7 +315,11 @@ class RAGRetriever:
         if count == 0:
             return []
 
-        query_embedding = self.embedding_fn.embed([query])[0]
+        try:
+            query_embedding = self.embedding_fn.embed([query])[0]
+        except Exception as exc:
+            logger.warning("embedding 查询向量生成失败，跳过 RAG 检索: %s", exc)
+            return []
         actual_k = min(k, count)
         try:
             res = self._collection.query(
