@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -203,3 +204,113 @@ def test_sync_wiki_proxies_to_retriever(qa):
     res = qa.sync_wiki(force=True)
     # 至少包含三个键
     assert set(res.keys()) >= {"updated", "skipped", "removed"}
+
+
+# ─── auto_sync_wiki: remote 模式 ──────────────────────────────────────────────
+
+def _write_wiki_source(parent: Path, url: str = "https://github.com/A/B") -> Path:
+    """在 parent 目录写 wiki_source.json，返回其路径。"""
+    f = parent / "wiki_source.json"
+    f.write_text(
+        json.dumps({"url": url, "commit_id": ""}),
+        encoding="utf-8",
+    )
+    return f
+
+
+def test_auto_sync_wiki_triggers_remote_when_dir_missing(tmp_dir):
+    """wiki 目录不存在 + wiki_source.json 存在 → 调用 check_and_update_wiki。"""
+    wiki_parent = tmp_dir / "csm-wiki"
+    wiki_parent.mkdir()
+    _write_wiki_source(wiki_parent)
+    wiki_dir = wiki_parent / "remote"  # 故意不创建
+
+    with (
+        patch("csm_qa.api.LLMClient") as mock_llm_cls,
+        patch("csm_qa.api.EmbeddingFunction", return_value=FakeEmbedding()),
+        patch("csm_qa.api.check_and_update_wiki") as mock_remote,
+    ):
+        mock_llm_cls.return_value = MagicMock()
+        mock_remote.return_value = True
+
+        CSM_QA(
+            api_key="sk-test",
+            wiki_dir=wiki_dir,
+            vector_store_dir=tmp_dir / "store",
+            auto_sync_wiki=True,
+        )
+
+    mock_remote.assert_called_once()
+    _, call_kwargs = mock_remote.call_args
+    assert call_kwargs["local_dir"] == wiki_dir
+
+
+def test_auto_sync_wiki_uses_regular_sync_when_dir_exists(tmp_dir):
+    """wiki 目录已存在 → 使用普通 sync_wiki()，不调用 check_and_update_wiki。"""
+    wiki_dir = tmp_dir / "wiki"
+    wiki_dir.mkdir()
+    (wiki_dir / "a.md").write_text("# test", encoding="utf-8")
+
+    with (
+        patch("csm_qa.api.LLMClient") as mock_llm_cls,
+        patch("csm_qa.api.EmbeddingFunction", return_value=FakeEmbedding()),
+        patch("csm_qa.api.check_and_update_wiki") as mock_remote,
+    ):
+        mock_llm_cls.return_value = MagicMock()
+
+        CSM_QA(
+            api_key="sk-test",
+            wiki_dir=wiki_dir,
+            vector_store_dir=tmp_dir / "store",
+            auto_sync_wiki=True,
+        )
+
+    mock_remote.assert_not_called()
+
+
+def test_auto_sync_wiki_uses_regular_sync_when_no_source_json(tmp_dir):
+    """wiki 目录不存在且无 wiki_source.json → 使用普通 sync_wiki()（静默无操作）。"""
+    wiki_dir = tmp_dir / "csm-wiki" / "remote"  # 不创建，父目录也无 source json
+
+    with (
+        patch("csm_qa.api.LLMClient") as mock_llm_cls,
+        patch("csm_qa.api.EmbeddingFunction", return_value=FakeEmbedding()),
+        patch("csm_qa.api.check_and_update_wiki") as mock_remote,
+    ):
+        mock_llm_cls.return_value = MagicMock()
+
+        CSM_QA(
+            api_key="sk-test",
+            wiki_dir=wiki_dir,
+            vector_store_dir=tmp_dir / "store",
+            auto_sync_wiki=True,
+        )
+
+    mock_remote.assert_not_called()
+
+
+def test_auto_sync_wiki_remote_exception_is_swallowed(tmp_dir):
+    """远程同步失败时不抛出，仅记录 warning，初始化正常完成。"""
+    wiki_parent = tmp_dir / "csm-wiki"
+    wiki_parent.mkdir()
+    _write_wiki_source(wiki_parent)
+    wiki_dir = wiki_parent / "remote"
+
+    with (
+        patch("csm_qa.api.LLMClient") as mock_llm_cls,
+        patch("csm_qa.api.EmbeddingFunction", return_value=FakeEmbedding()),
+        patch(
+            "csm_qa.api.check_and_update_wiki",
+            side_effect=RuntimeError("network error"),
+        ),
+    ):
+        mock_llm_cls.return_value = MagicMock()
+
+        # 不应抛出异常
+        qa = CSM_QA(
+            api_key="sk-test",
+            wiki_dir=wiki_dir,
+            vector_store_dir=tmp_dir / "store",
+            auto_sync_wiki=True,
+        )
+    assert qa is not None

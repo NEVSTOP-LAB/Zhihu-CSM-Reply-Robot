@@ -26,6 +26,7 @@ from csm_qa.prompts import DEFAULT_SYSTEM_PROMPT, build_system_message
 from csm_qa.providers import resolve_endpoint
 from csm_qa.rag import EmbeddingFunction, EmbeddingProvider, RAGRetriever
 from csm_qa.types import AnswerResult, Message
+from csm_qa.wiki_updater import check_and_update_wiki
 
 logger = logging.getLogger(__name__)
 
@@ -121,10 +122,23 @@ class CSM_QA:
         self.similarity_threshold = similarity_threshold
 
         if auto_sync_wiki and self._rag.is_empty():
-            try:
-                self._rag.sync_wiki()
-            except Exception as exc:
-                logger.warning("auto_sync_wiki 失败（已忽略）: %s", exc)
+            wiki_path = Path(wiki_dir)
+            source_file = wiki_path.parent / "wiki_source.json"
+            if not wiki_path.exists() and source_file.exists():
+                # wiki 目录尚未克隆，但存在 wiki_source.json —— 触发远程同步
+                try:
+                    check_and_update_wiki(
+                        source_file=source_file,
+                        local_dir=wiki_path,
+                        retriever=self._rag,
+                    )
+                except Exception as exc:
+                    logger.warning("auto_sync_wiki (remote) 失败（已忽略）: %s", exc)
+            else:
+                try:
+                    self._rag.sync_wiki()
+                except Exception as exc:
+                    logger.warning("auto_sync_wiki 失败（已忽略）: %s", exc)
 
     # ─── 工厂方法 ────────────────────────────────────────────────
 

@@ -67,7 +67,7 @@ CSM_QA(
     max_retries=3,
     request_timeout=60.0,
 
-    wiki_dir="csm-wiki",                    # 知识库目录
+    wiki_dir="csm-wiki/remote",             # 知识库目录
     vector_store_dir=".csm_qa/vector_store",
     embedding_provider="local",             # "local"（本地）或 "openai"
     embedding_model="BAAI/bge-small-zh-v1.5",
@@ -111,15 +111,21 @@ qa = CSM_QA.from_env()
 
 ## 知识库
 
-把任意 Markdown 文档放入 `csm-wiki/` 目录即可（支持子目录、UTF-8 / GBK / Big5 自动识别）。
+把任意 Markdown 文档放入 `csm-wiki/remote/` 目录即可（支持子目录、UTF-8 / GBK / Big5 自动识别）。
 
-- 首次构造 `CSM_QA` 时若向量库为空，会自动调用 `sync_wiki()`。
+- 首次构造 `CSM_QA` 时若向量库为空：
+  - 若 `csm-wiki/remote/` 目录不存在但 `csm-wiki/wiki_source.json` 存在，会自动从远程仓库克隆 wiki 并建立索引。
+  - 若 `csm-wiki/remote/` 已存在，则直接对目录做增量同步。
+  - 若两者均不存在，则跳过同步（无 RAG 上下文，仅凭 LLM 本身回答）。
 - 之后可通过命令行手动增量同步：
 
 ```bash
 python -m csm_qa.sync_wiki                 # 增量
 python -m csm_qa.sync_wiki --force         # 强制重建
 python -m csm_qa.sync_wiki --wiki ./docs --store ./.csm_qa/vector_store
+
+# 通过 wiki_source.json 检查远程更新并按需拉取
+python -m csm_qa.sync_wiki --remote
 ```
 
 或在代码中：
