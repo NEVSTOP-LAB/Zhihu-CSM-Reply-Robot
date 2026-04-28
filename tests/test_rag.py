@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 from pathlib import Path
 
 import pytest
@@ -47,11 +48,13 @@ def retriever(tmp_dir: Path) -> RAGRetriever:
     wiki = tmp_dir / "wiki"
     store = tmp_dir / "store"
     wiki.mkdir()
-    return RAGRetriever(
+    retriever = RAGRetriever(
         wiki_dir=wiki,
         vector_store_dir=store,
         embedding_fn=FakeEmbedding(),
     )
+    yield retriever
+    retriever.close()
 
 
 def test_initial_state_is_empty(retriever: RAGRetriever):
@@ -135,6 +138,22 @@ def test_retrieve_returns_relevant_chunks(retriever: RAGRetriever):
     assert any("CSM" in r and "状态机" in r for r in results)
 
 
+def test_retrieve_logs_hit_details(retriever: RAGRetriever, caplog):
+    _write(
+        retriever.wiki_dir / "csm.md",
+        "# CSM 状态机\nCSM 状态机 切换 通过 消息 通信",
+    )
+    retriever.sync_wiki()
+
+    with caplog.at_level("INFO", logger="csm_qa.rag"):
+        results = retriever.retrieve("CSM 状态机 切换", k=1, threshold=0.0)
+
+    assert len(results) == 1
+    assert "RAG 命中 1 条" in caplog.text
+    assert "source=csm.md" in caplog.text
+    assert "heading=CSM 状态机" in caplog.text
+
+
 def test_retrieve_empty_query_returns_empty(retriever: RAGRetriever):
     _write(retriever.wiki_dir / "a.md", "# A\ncontent")
     retriever.sync_wiki()
@@ -154,3 +173,54 @@ def test_retrieve_embedding_failure_returns_empty(retriever: RAGRetriever):
     retriever.embedding_fn = BrokenEmbedding()
     result = retriever.retrieve("content")
     assert result == []
+
+
+def test_local_embedding_sets_default_hf_endpoint_before_loading(monkeypatch):
+    monkeypatch.delenv("HF_ENDPOINT", raising=False)
+    embedding = EmbeddingFunction()
+    observed: dict[str, str | None] = {}
+
+    class FakeEncoded:
+        def tolist(self):
+            return [[1.0, 0.0]]
+
+    class FakeModel:
+        def encode(self, texts, normalize_embeddings=True):
+            return FakeEncoded()
+
+    def fake_create_local_model(self):
+        observed["endpoint"] = os.environ.get("HF_ENDPOINT")
+        return FakeModel()
+
+    monkeypatch.setattr(
+        EmbeddingFunction,
+        "_create_local_model",
+        fake_create_local_model,
+    )
+
+    result = embedding.embed(["hello"])
+    assert result == [[1.0, 0.0]]
+    assert observed["endpoint"] == "https://hf-mirror.com"
+
+
+def test_local_embedding_load_failure_is_not_retried(monkeypatch):
+    embedding = EmbeddingFunction()
+    calls = {"count": 0}
+
+    def fake_create_local_model(self):
+        calls["count"] += 1
+        raise RuntimeError("ssl failed")
+
+    monkeypatch.setattr(
+        EmbeddingFunction,
+        "_create_local_model",
+        fake_create_local_model,
+    )
+
+    with pytest.raises(RuntimeError, match="本地 Embedding 模型初始化失败"):
+        embedding.embed(["first"])
+
+    with pytest.raises(RuntimeError, match="已停止后续重试"):
+        embedding.embed(["second"])
+
+    assert calls["count"] == 1

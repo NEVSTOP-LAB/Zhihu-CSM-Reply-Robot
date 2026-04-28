@@ -34,3 +34,4 @@ Thumbs.db
 
 # HuggingFace model cache
 .cache/
+config.ini

@@ -24,6 +24,13 @@ logger = logging.getLogger(__name__)
 EmbeddingProvider = Literal["local", "openai"]
 
 
+def _preview_text(text: str, limit: int = 80) -> str:
+    compact = " ".join(text.split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 3] + "..."
+
+
 class EmbeddingFunction:
     """Embedding 抽象，支持本地 sentence-transformers 与线上 OpenAI。"""
 
@@ -43,30 +50,47 @@ class EmbeddingFunction:
             "SENTENCE_TRANSFORMERS_HOME"
         )
         self._local_model = None
+        self._local_model_error: Optional[Exception] = None
         self._online_client = None
 
     # ─── 内部加载 ────────────────────────────────────────────────
 
+    def _configure_huggingface_endpoint(self) -> None:
+        # HF_ENDPOINT 为空字符串会导致 huggingface_hub 构造无协议前缀的 URL。
+        # 默认使用国内镜像站，避免 huggingface.co 不可访问时下载失败。
+        # 如需使用官方源，可通过环境变量显式设置 HF_ENDPOINT=https://huggingface.co。
+        if os.environ.get("HF_ENDPOINT", "").strip():
+            return
+
+        os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+        try:
+            import huggingface_hub.constants as _hf_constants
+
+            _hf_constants.ENDPOINT = "https://hf-mirror.com"
+        except Exception:
+            pass
+
+    def _create_local_model(self):
+        from sentence_transformers import SentenceTransformer
+
+        return SentenceTransformer(self.model, cache_folder=self.cache_folder)
+
     def _get_local_model(self):
+        if self._local_model_error is not None:
+            raise RuntimeError("本地 Embedding 模型初始化失败，已停止后续重试") from self._local_model_error
+
         if self._local_model is None:
-            from sentence_transformers import SentenceTransformer
-
-            # HF_ENDPOINT 为空字符串会导致 huggingface_hub 构造无协议前缀的 URL。
-            # 默认使用国内镜像站，避免 huggingface.co 不可访问时下载失败。
-            # 如需使用官方源，可通过环境变量显式设置 HF_ENDPOINT=https://huggingface.co。
-            if not os.environ.get("HF_ENDPOINT", "").strip():
-                os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-                try:
-                    import huggingface_hub.constants as _hf_constants
-
-                    _hf_constants.ENDPOINT = "https://hf-mirror.com"
-                except Exception:
-                    pass
-
+            self._configure_huggingface_endpoint()
             logger.info("加载本地 Embedding 模型: %s", self.model)
-            self._local_model = SentenceTransformer(
-                self.model, cache_folder=self.cache_folder
-            )
+            try:
+                self._local_model = self._create_local_model()
+            except Exception as exc:
+                self._local_model_error = exc
+                logger.warning(
+                    "加载本地 Embedding 模型失败，已停止后续重试: %s",
+                    exc,
+                )
+                raise RuntimeError("本地 Embedding 模型初始化失败") from exc
         return self._local_model
 
     def _get_online_client(self):
@@ -200,6 +224,13 @@ class RAGRetriever:
         except Exception:
             return True
 
+    def close(self) -> None:
+        """释放向量库底层资源，避免 Windows 下测试清理临时目录失败。"""
+        try:
+            self._client.close()
+        except Exception:
+            pass
+
     def sync_wiki(self, force: bool = False) -> dict:
         """同步 wiki 目录到向量库。
 
@@ -331,12 +362,41 @@ class RAGRetriever:
             return []
 
         out: list[str] = []
+        hit_logs: list[str] = []
         if res and res.get("documents"):
-            for docs, distances in zip(res["documents"], res["distances"]):
-                for doc, dist in zip(docs, distances):
+            metadatas_list = res.get("metadatas") or []
+            for docs, distances, metadatas in zip(
+                res["documents"],
+                res["distances"],
+                metadatas_list or ([[]] * len(res["documents"])),
+            ):
+                for index, (doc, dist) in enumerate(zip(docs, distances), start=1):
                     # ChromaDB 默认返回 L2 距离，归一化向量下：
                     # cosine = 1 - dist^2 / 2
                     similarity = 1 - (dist ** 2) / 2
                     if similarity >= threshold:
                         out.append(doc)
+                        metadata = (
+                            metadatas[index - 1]
+                            if index - 1 < len(metadatas)
+                            else {}
+                        ) or {}
+                        source = metadata.get("source", "(unknown)")
+                        heading = metadata.get("heading", "Untitled")
+                        hit_logs.append(
+                            f"#{index} source={source} heading={heading} "
+                            f"similarity={similarity:.3f} preview={_preview_text(doc)}"
+                        )
+        if hit_logs:
+            logger.info(
+                "RAG 命中 %d 条: %s",
+                len(hit_logs),
+                " | ".join(hit_logs[:k]),
+            )
+        else:
+            logger.info(
+                "RAG 未命中: threshold=%.2f query=%s",
+                threshold,
+                _preview_text(query, limit=60),
+            )
         return out[:k]
