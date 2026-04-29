@@ -316,19 +316,170 @@ def build_reply(answer: str) -> str:
     return f"{answer.rstrip()}{BOT_FOOTER}\n{BOT_MARKER}"
 
 
-def process_discussion(
+def resolve_org_qa_category_id(client: GitHubGraphQL, org: str) -> str:
+    """通过 GraphQL 查询组织中名为 'Q&A' 的 Discussion Category node ID。
+
+    Raises:
+        RuntimeError: 未找到 Q&A category。
+    """
+    gql = """
+    query($org: String!) {
+      organization(login: $org) {
+        discussionCategories(first: 30) {
+          nodes {
+            id
+            name
+            slug
+            isAnswerable
+          }
+        }
+      }
+    }
+    """
+    data = client.query(gql, {"org": org})
+    nodes = (
+        data.get("organization", {})
+        .get("discussionCategories", {})
+        .get("nodes", [])
+    )
+    for node in nodes:
+        if node.get("name", "").strip() == QA_CATEGORY_NAME:
+            logger.info(
+                "找到组织 Q&A category: id=%s slug=%s isAnswerable=%s",
+                node["id"],
+                node.get("slug"),
+                node.get("isAnswerable"),
+            )
+            return node["id"]
+    available = [n.get("name") for n in nodes]
+    raise RuntimeError(
+        f"未找到组织 {org!r} 中名为 {QA_CATEGORY_NAME!r} 的 Discussion Category，"
+        f"已有分类: {available}"
+    )
+
+
+def fetch_org_discussion(
+    client: GitHubGraphQL, org: str, number: int
+) -> dict[str, Any]:
+    """拉取指定组织级 discussion 的详情（含所有评论，自动分页）。
+
+    Raises:
+        RuntimeError: Discussion 不存在或无权限。
+    """
+    gql = """
+    query($org: String!, $number: Int!) {
+      organization(login: $org) {
+        discussion(number: $number) {
+          id
+          number
+          title
+          body
+          url
+          category {
+            id
+            name
+          }
+          comments(first: 100) {
+            nodes {
+              id
+              body
+              author { login }
+            }
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
+          }
+        }
+      }
+    }
+    """
+    data = client.query(gql, {"org": org, "number": number})
+    disc = data.get("organization", {}).get("discussion")
+    if not disc:
+        raise RuntimeError(f"组织 Discussion #{number} 不存在或无权限访问")
+
+    while disc["comments"]["pageInfo"]["hasNextPage"]:
+        cursor = disc["comments"]["pageInfo"]["endCursor"]
+        more = _fetch_more_comments(client, disc["id"], cursor)
+        disc["comments"]["nodes"].extend(more.get("nodes", []))
+        disc["comments"]["pageInfo"] = more.get(
+            "pageInfo", {"hasNextPage": False, "endCursor": None}
+        )
+
+    return disc
+
+
+def scan_org_qa_discussions(
+    client: GitHubGraphQL, org: str, category_id: str, limit: int = 30
+) -> list[dict[str, Any]]:
+    """返回组织 Q&A 分类中最新的 *limit* 条 Discussion（含所有评论，自动分页）。"""
+    gql = """
+    query($org: String!, $categoryId: ID!, $limit: Int!) {
+      organization(login: $org) {
+        discussions(
+          first: $limit,
+          categoryId: $categoryId,
+          orderBy: {field: CREATED_AT, direction: DESC}
+        ) {
+          nodes {
+            id
+            number
+            title
+            body
+            url
+            category {
+              id
+              name
+            }
+            comments(first: 100) {
+              nodes {
+                id
+                body
+                author { login }
+              }
+              pageInfo {
+                hasNextPage
+                endCursor
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+    data = client.query(gql, {"org": org, "categoryId": category_id, "limit": limit})
+    nodes = (
+        data.get("organization", {})
+        .get("discussions", {})
+        .get("nodes", [])
+    )
+    for disc in nodes:
+        while disc["comments"]["pageInfo"]["hasNextPage"]:
+            cursor = disc["comments"]["pageInfo"]["endCursor"]
+            more = _fetch_more_comments(client, disc["id"], cursor)
+            disc["comments"]["nodes"].extend(more.get("nodes", []))
+            disc["comments"]["pageInfo"] = more.get(
+                "pageInfo", {"hasNextPage": False, "endCursor": None}
+            )
+    return nodes
+
+
+def _process_discussion_dict(
     client: GitHubGraphQL,
     qa_engine: CSM_QA,
-    owner: str,
-    repo: str,
-    number: int,
+    discussion: dict[str, Any],
     qa_category_id: str,
     *,
     dry_run: bool = False,
     bot_login: Optional[str] = None,
 ) -> bool:
-    """处理单条 Discussion，返回 True 表示已回复（或 dry-run 打印），False 表示跳过。"""
-    discussion = fetch_discussion(client, owner, repo, number)
+    """已取得 discussion dict 后的核心处理逻辑。
+
+    Returns:
+        True 表示已回复（或 dry-run 打印），False 表示跳过。
+    """
+    number = discussion.get("number")
     disc_category_id = discussion.get("category", {}).get("id", "")
     disc_category_name = discussion.get("category", {}).get("name", "")
 
@@ -362,6 +513,25 @@ def process_discussion(
     post_comment(client, disc_id, reply_body)
     logger.info("Discussion #%d 已成功回复", number)
     return True
+
+
+def process_discussion(
+    client: GitHubGraphQL,
+    qa_engine: CSM_QA,
+    owner: str,
+    repo: str,
+    number: int,
+    qa_category_id: str,
+    *,
+    dry_run: bool = False,
+    bot_login: Optional[str] = None,
+) -> bool:
+    """处理单条仓库 Discussion，返回 True 表示已回复（或 dry-run 打印），False 表示跳过。"""
+    discussion = fetch_discussion(client, owner, repo, number)
+    return _process_discussion_dict(
+        client, qa_engine, discussion, qa_category_id,
+        dry_run=dry_run, bot_login=bot_login,
+    )
 
 
 # ── 触发模式处理 ─────────────────────────────────────────────────────────────
@@ -420,7 +590,7 @@ def run_manual_mode(
     dry_run: bool = False,
     bot_login: Optional[str] = None,
 ) -> None:
-    """手动模式：直接处理指定 discussion。"""
+    """手动模式：直接处理指定仓库 Discussion。"""
     process_discussion(
         client,
         qa_engine,
@@ -431,6 +601,46 @@ def run_manual_mode(
         dry_run=dry_run,
         bot_login=bot_login,
     )
+
+
+def run_org_discussion_mode(
+    client: GitHubGraphQL,
+    qa_engine: CSM_QA,
+    org: str,
+    org_qa_category_id: str,
+    discussion_number: int,
+    *,
+    dry_run: bool = False,
+    bot_login: Optional[str] = None,
+) -> None:
+    """手动模式：直接处理指定组织级 Discussion。"""
+    discussion = fetch_org_discussion(client, org, discussion_number)
+    _process_discussion_dict(
+        client, qa_engine, discussion, org_qa_category_id,
+        dry_run=dry_run, bot_login=bot_login,
+    )
+
+
+def run_scan_mode(
+    client: GitHubGraphQL,
+    qa_engine: CSM_QA,
+    org: str,
+    org_qa_category_id: str,
+    *,
+    dry_run: bool = False,
+    bot_login: Optional[str] = None,
+) -> None:
+    """定时扫描模式：处理组织 Q&A 分类中所有未回复的 Discussion。"""
+    discussions = scan_org_qa_discussions(client, org, org_qa_category_id)
+    logger.info("找到 %d 条组织 Q&A 讨论", len(discussions))
+    replied = 0
+    for disc in discussions:
+        if _process_discussion_dict(
+            client, qa_engine, disc, org_qa_category_id,
+            dry_run=dry_run, bot_login=bot_login,
+        ):
+            replied += 1
+    logger.info("本次扫描共回复 %d 条讨论", replied)
 
 
 # ── 入口 ─────────────────────────────────────────────────────────────────────
@@ -451,7 +661,18 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         "--discussion-number",
         type=int,
         metavar="N",
-        help="手动指定要处理的 Discussion 编号（workflow_dispatch 或本地调试时使用）",
+        help="手动指定要处理的仓库 Discussion 编号（workflow_dispatch 或本地调试时使用）",
+    )
+    group.add_argument(
+        "--org-discussion-number",
+        type=int,
+        metavar="N",
+        help="手动指定要处理的组织级 Discussion 编号",
+    )
+    group.add_argument(
+        "--scan-org",
+        action="store_true",
+        help="扫描组织 Q&A 分类中所有未回复的 Discussion（定时任务使用）",
     )
     parser.add_argument(
         "--dry-run",
@@ -488,12 +709,6 @@ def main(argv: Optional[list[str]] = None) -> int:
         logger.warning("无法获取 Bot 账号，has_bot_replied 将仅按 marker 检测")
 
     try:
-        qa_category_id = resolve_qa_category_id(client, owner, repo)
-    except RuntimeError as exc:
-        logger.error("无法解析 Q&A category: %s", exc)
-        return 1
-
-    try:
         qa_engine = CSM_QA.from_env()
     except Exception as exc:
         logger.error("CSM_QA 初始化失败: %s", exc)
@@ -502,6 +717,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     # ── 执行 ─────────────────────────────────────────────────────────────────
     try:
         if args.event:
+            qa_category_id = resolve_qa_category_id(client, owner, repo)
             run_event_mode(
                 client,
                 qa_engine,
@@ -511,7 +727,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                 dry_run=args.dry_run,
                 bot_login=bot_login,
             )
-        else:
+        elif args.discussion_number is not None:
+            qa_category_id = resolve_qa_category_id(client, owner, repo)
             run_manual_mode(
                 client,
                 qa_engine,
@@ -519,6 +736,28 @@ def main(argv: Optional[list[str]] = None) -> int:
                 repo,
                 qa_category_id,
                 args.discussion_number,
+                dry_run=args.dry_run,
+                bot_login=bot_login,
+            )
+        elif args.org_discussion_number is not None:
+            org_category_id = resolve_org_qa_category_id(client, owner)
+            run_org_discussion_mode(
+                client,
+                qa_engine,
+                owner,
+                org_category_id,
+                args.org_discussion_number,
+                dry_run=args.dry_run,
+                bot_login=bot_login,
+            )
+        else:
+            # --scan-org
+            org_category_id = resolve_org_qa_category_id(client, owner)
+            run_scan_mode(
+                client,
+                qa_engine,
+                owner,
+                org_category_id,
                 dry_run=args.dry_run,
                 bot_login=bot_login,
             )

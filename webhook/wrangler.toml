@@ -1,0 +1,13 @@
+name = "csm-qa-bot-webhook-relay"
+main = "cloudflare-worker.js"
+compatibility_date = "2024-09-01"
+
+# 通过 `wrangler secret put <NAME>` 注入下列敏感变量（不要明文写在此文件）：
+#   WEBHOOK_SECRET           – GitHub App webhook secret
+#   GITHUB_APP_ID            – GitHub App ID（数字）
+#   GITHUB_APP_PRIVATE_KEY   – GitHub App 私钥（PKCS#8 PEM 全文）
+#
+# 非敏感变量可直接放在 [vars]：
+[vars]
+REPO_OWNER = "NEVSTOP-LAB"
+REPO_NAME = "CSM-QA-Robot"

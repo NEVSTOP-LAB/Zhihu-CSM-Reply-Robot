@@ -20,7 +20,11 @@ from scripts.discussion_bot import (
     build_reply,
     has_bot_replied,
     _fetch_more_comments,
+    _process_discussion_dict,
     get_viewer_login,
+    resolve_org_qa_category_id,
+    fetch_org_discussion,
+    scan_org_qa_discussions,
 )
 
 
@@ -212,3 +216,170 @@ def test_fetch_more_comments_returns_empty_on_missing_node():
     result = _fetch_more_comments(client, "D_xxx", "cursor123")
     assert result["nodes"] == []
     assert result["pageInfo"]["hasNextPage"] is False
+
+
+# ── resolve_org_qa_category_id ────────────────────────────────────────────────
+
+
+def test_resolve_org_qa_category_id_found():
+    """能正确返回组织中名为 'Q&A' 的 category ID。"""
+    data = {
+        "organization": {
+            "discussionCategories": {
+                "nodes": [
+                    {"id": "cat1", "name": "General", "slug": "general", "isAnswerable": False},
+                    {"id": "cat2", "name": "Q&A", "slug": "q-a", "isAnswerable": True},
+                ]
+            }
+        }
+    }
+    client = _MockGraphQL(data)
+    assert resolve_org_qa_category_id(client, "NEVSTOP-LAB") == "cat2"
+
+
+def test_resolve_org_qa_category_id_not_found():
+    """未找到 Q&A category 时应抛出 RuntimeError。"""
+    data = {
+        "organization": {
+            "discussionCategories": {
+                "nodes": [
+                    {"id": "cat1", "name": "General", "slug": "general", "isAnswerable": False},
+                ]
+            }
+        }
+    }
+    client = _MockGraphQL(data)
+    with pytest.raises(RuntimeError, match="Q&A"):
+        resolve_org_qa_category_id(client, "NEVSTOP-LAB")
+
+
+def test_resolve_org_qa_category_id_empty():
+    """分类列表为空时应抛出 RuntimeError。"""
+    data = {"organization": {"discussionCategories": {"nodes": []}}}
+    client = _MockGraphQL(data)
+    with pytest.raises(RuntimeError):
+        resolve_org_qa_category_id(client, "NEVSTOP-LAB")
+
+
+# ── fetch_org_discussion ──────────────────────────────────────────────────────
+
+
+def _make_org_discussion_payload(number: int = 31, comments: list[dict] | None = None) -> dict:
+    """构造 organization.discussion GraphQL 响应 payload。"""
+    return {
+        "organization": {
+            "discussion": {
+                "id": f"D_org_{number}",
+                "number": number,
+                "title": f"Org Discussion #{number}",
+                "body": "Body text",
+                "url": f"https://github.com/orgs/NEVSTOP-LAB/discussions/{number}",
+                "category": {"id": "cat2", "name": "Q&A"},
+                "comments": {
+                    "nodes": comments or [],
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                },
+            }
+        }
+    }
+
+
+def test_fetch_org_discussion_returns_discussion():
+    client = _MockGraphQL(_make_org_discussion_payload(31))
+    disc = fetch_org_discussion(client, "NEVSTOP-LAB", 31)
+    assert disc["number"] == 31
+    assert disc["id"] == "D_org_31"
+    assert disc["category"]["name"] == "Q&A"
+
+
+def test_fetch_org_discussion_not_found():
+    client = _MockGraphQL({"organization": {"discussion": None}})
+    with pytest.raises(RuntimeError, match="31"):
+        fetch_org_discussion(client, "NEVSTOP-LAB", 31)
+
+
+# ── scan_org_qa_discussions ───────────────────────────────────────────────────
+
+
+def test_scan_org_qa_discussions_returns_list():
+    """scan_org_qa_discussions 应返回 discussion 列表。"""
+    data = {
+        "organization": {
+            "discussions": {
+                "nodes": [
+                    {
+                        "id": "D1",
+                        "number": 1,
+                        "title": "Q1",
+                        "body": "body1",
+                        "url": "https://github.com/orgs/NEVSTOP-LAB/discussions/1",
+                        "category": {"id": "cat2", "name": "Q&A"},
+                        "comments": {
+                            "nodes": [],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        },
+                    }
+                ]
+            }
+        }
+    }
+    client = _MockGraphQL(data)
+    discussions = scan_org_qa_discussions(client, "NEVSTOP-LAB", "cat2")
+    assert len(discussions) == 1
+    assert discussions[0]["number"] == 1
+
+
+def test_scan_org_qa_discussions_empty():
+    """分类下无讨论时应返回空列表。"""
+    data = {"organization": {"discussions": {"nodes": []}}}
+    client = _MockGraphQL(data)
+    assert scan_org_qa_discussions(client, "NEVSTOP-LAB", "cat2") == []
+
+
+# ── _process_discussion_dict ──────────────────────────────────────────────────
+
+
+class _FakeQAEngine:
+    """最小化 QA 引擎 mock，总是返回固定答案。"""
+    def ask(self, question: str) -> str:
+        return f"answer to: {question}"
+
+
+def test_process_discussion_dict_skips_wrong_category():
+    """分类不匹配时应跳过（返回 False）。"""
+    client = _MockGraphQL({})
+    disc = {
+        "id": "D1", "number": 1, "title": "Q", "body": "",
+        "url": "https://github.com/orgs/NEVSTOP-LAB/discussions/1",
+        "category": {"id": "other-cat", "name": "General"},
+        "comments": {"nodes": []},
+    }
+    result = _process_discussion_dict(client, _FakeQAEngine(), disc, "qa-cat", dry_run=True)
+    assert result is False
+
+
+def test_process_discussion_dict_skips_already_replied():
+    """已有 Bot 回复时应跳过（返回 False）。"""
+    from scripts.discussion_bot import BOT_MARKER
+    client = _MockGraphQL({})
+    disc = {
+        "id": "D1", "number": 1, "title": "Q", "body": "",
+        "url": "https://github.com/orgs/NEVSTOP-LAB/discussions/1",
+        "category": {"id": "qa-cat", "name": "Q&A"},
+        "comments": {"nodes": [{"id": "c0", "body": f"reply {BOT_MARKER}", "author": {"login": "bot"}}]},
+    }
+    result = _process_discussion_dict(client, _FakeQAEngine(), disc, "qa-cat", dry_run=True)
+    assert result is False
+
+
+def test_process_discussion_dict_dry_run_returns_true():
+    """dry_run 模式下应生成回复并返回 True，不实际发帖。"""
+    client = _MockGraphQL({})
+    disc = {
+        "id": "D1", "number": 1, "title": "How does CSM work?", "body": "",
+        "url": "https://github.com/orgs/NEVSTOP-LAB/discussions/1",
+        "category": {"id": "qa-cat", "name": "Q&A"},
+        "comments": {"nodes": []},
+    }
+    result = _process_discussion_dict(client, _FakeQAEngine(), disc, "qa-cat", dry_run=True)
+    assert result is True
