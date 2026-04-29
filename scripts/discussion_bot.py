@@ -182,6 +182,7 @@ def _fetch_more_comments(
             nodes {
               id
               body
+              createdAt
               author { login }
             }
             pageInfo {
@@ -217,6 +218,7 @@ def fetch_discussion(
           title
           body
           url
+          closed
           category {
             id
             name
@@ -225,6 +227,7 @@ def fetch_discussion(
             nodes {
               id
               body
+              createdAt
               author { login }
             }
             pageInfo {
@@ -290,6 +293,95 @@ def has_bot_replied(discussion: dict, bot_login: Optional[str] = None) -> bool:
         if author == bot_login:
             return True
     return False
+
+
+def _is_bot_comment(comment: dict, bot_login: Optional[str]) -> bool:
+    """判断单条评论是否为 Bot 自动生成。
+
+    严格 fail-closed：必须同时满足"含 BOT_MARKER"且"作者 == bot_login"才认定为 Bot。
+    若调用方未提供 ``bot_login``（如 viewer 查询失败），则一律返回 ``False``，
+    避免普通用户在评论中粘贴 marker 就能伪装为 assistant 注入到对话历史 / 干扰
+    follow-up 判定。``has_bot_replied`` 仍保留宽松匹配以防止重复回复。
+    """
+    body = comment.get("body") or ""
+    if BOT_MARKER not in body:
+        return False
+    if bot_login is None:
+        return False
+    author = (comment.get("author") or {}).get("login", "")
+    return author == bot_login
+
+
+def compute_reply_plan(
+    discussion: dict, bot_login: Optional[str] = None
+) -> Optional[tuple[str, list[dict[str, str]]]]:
+    """决定是否需要回复，以及回复时的 question / history。
+
+    判定规则（评论默认按创建时间升序返回）：
+
+    * 若 discussion 中尚无 Bot 回复 → 视为新问题，``question = title + body``，``history = []``。
+    * 若已有 Bot 回复，且最后一条 Bot 回复之后存在用户的新追问 → 取追问中最后一条作为
+      ``question``，并把"原帖 + 中间所有评论（不含本次追问）"按 user/assistant 顺序
+      组装为 ``history``。
+    * 否则（已回复且无后续追问）→ 返回 ``None`` 表示无需回复。
+
+    Returns:
+        ``(question, history)`` 或 ``None``。``history`` 元素形如
+        ``{"role": "user"|"assistant", "content": str}``。
+    """
+    title = (discussion.get("title") or "").strip()
+    body = (discussion.get("body") or "").strip()
+    original_question = f"{title}\n\n{body}".strip() if body else title
+
+    comments = discussion.get("comments", {}).get("nodes", []) or []
+
+    # 安全保护：若 bot_login 未知（viewer 查询失败），无法可靠区分 Bot 真实回复
+    # 与用户伪造的 marker，故只要任意评论含 BOT_MARKER 就跳过整个 discussion，
+    # 既避免重复回复（marker 可能确实来自之前真实 Bot），也防止伪造内容被注入
+    # 到 follow-up 的 history 中。
+    if bot_login is None:
+        if any(BOT_MARKER in (c.get("body") or "") for c in comments):
+            return None
+        return original_question, []
+
+    # 找到最后一条 Bot 回复的索引
+    last_bot_idx = -1
+    for i, c in enumerate(comments):
+        if _is_bot_comment(c, bot_login):
+            last_bot_idx = i
+
+    if last_bot_idx == -1:
+        # 从未回复过 → 新问题
+        return original_question, []
+
+    # 已回复：检查最后一条 Bot 回复之后是否存在用户的追问（任何非 Bot 评论）
+    followup_user_indices = [
+        i
+        for i in range(last_bot_idx + 1, len(comments))
+        if not _is_bot_comment(comments[i], bot_login)
+    ]
+    if not followup_user_indices:
+        return None  # 已回复且无追问 → 跳过
+
+    latest_followup_idx = followup_user_indices[-1]
+    latest_followup_body = (comments[latest_followup_idx].get("body") or "").strip()
+    if not latest_followup_body:
+        # 追问内容为空，视为无效
+        return None
+
+    # 组装 history：原帖作为首条 user，再依次把 [0, latest_followup_idx) 范围内
+    # 的评论按 bot/user 角色串成 assistant/user，最后那条追问留作 question。
+    history: list[dict[str, str]] = [
+        {"role": "user", "content": original_question}
+    ]
+    for i in range(latest_followup_idx):
+        c_body = (comments[i].get("body") or "").strip()
+        if not c_body:
+            continue
+        role = "assistant" if _is_bot_comment(comments[i], bot_login) else "user"
+        history.append({"role": role, "content": c_body})
+
+    return latest_followup_body, history
 
 
 def post_comment(client: GitHubGraphQL, discussion_id: str, body: str) -> str:
@@ -392,6 +484,7 @@ def fetch_org_discussion(
           title
           body
           url
+          closed
           category {
             id
             name
@@ -400,6 +493,7 @@ def fetch_org_discussion(
             nodes {
               id
               body
+              createdAt
               author { login }
             }
             pageInfo {
@@ -428,14 +522,24 @@ def fetch_org_discussion(
 
 
 def scan_org_qa_discussions(
-    client: GitHubGraphQL, org: str, category_id: str, limit: int = 30
+    client: GitHubGraphQL,
+    org: str,
+    category_id: str,
+    page_size: int = 50,
+    max_pages: int = 20,
 ) -> list[dict[str, Any]]:
-    """返回组织 Q&A 分类中最新的 *limit* 条 Discussion（含所有评论，自动分页）。"""
+    """全量扫描组织 Q&A 分类下的 Discussion（含所有评论，自动分页）。
+
+    会跳过 ``closed = True`` 的 discussion，仅返回 open 状态的 discussion。
+    通过 ``pageInfo`` 翻页，最多扫描 ``max_pages * page_size`` 条 discussion，
+    以避免 PAT 配额异常时陷入死循环。
+    """
     gql = """
-    query($org: String!, $categoryId: ID!, $limit: Int!) {
+    query($org: String!, $categoryId: ID!, $pageSize: Int!, $cursor: String) {
       organization(login: $org) {
         discussions(
-          first: $limit,
+          first: $pageSize,
+          after: $cursor,
           categoryId: $categoryId,
           orderBy: {field: CREATED_AT, direction: DESC}
         ) {
@@ -445,6 +549,7 @@ def scan_org_qa_discussions(
             title
             body
             url
+            closed
             category {
               id
               name
@@ -453,6 +558,7 @@ def scan_org_qa_discussions(
               nodes {
                 id
                 body
+                createdAt
                 author { login }
               }
               pageInfo {
@@ -461,25 +567,42 @@ def scan_org_qa_discussions(
               }
             }
           }
+          pageInfo {
+            hasNextPage
+            endCursor
+          }
         }
       }
     }
     """
-    data = client.query(gql, {"org": org, "categoryId": category_id, "limit": limit})
-    nodes = (
-        data.get("organization", {})
-        .get("discussions", {})
-        .get("nodes", [])
-    )
-    for disc in nodes:
-        while disc["comments"]["pageInfo"]["hasNextPage"]:
-            cursor = disc["comments"]["pageInfo"]["endCursor"]
-            more = _fetch_more_comments(client, disc["id"], cursor)
-            disc["comments"]["nodes"].extend(more.get("nodes", []))
-            disc["comments"]["pageInfo"] = more.get(
-                "pageInfo", {"hasNextPage": False, "endCursor": None}
-            )
-    return nodes
+    cursor: Optional[str] = None
+    all_open: list[dict[str, Any]] = []
+    for _ in range(max_pages):
+        data = client.query(
+            gql,
+            {"org": org, "categoryId": category_id, "pageSize": page_size, "cursor": cursor},
+        )
+        discussions_data = data.get("organization", {}).get("discussions", {})
+        nodes = discussions_data.get("nodes", []) or []
+        page_info = discussions_data.get(
+            "pageInfo", {"hasNextPage": False, "endCursor": None}
+        )
+        for disc in nodes:
+            if disc.get("closed"):
+                continue
+            # 拉取该 discussion 的全部评论
+            while disc["comments"]["pageInfo"]["hasNextPage"]:
+                inner_cursor = disc["comments"]["pageInfo"]["endCursor"]
+                more = _fetch_more_comments(client, disc["id"], inner_cursor)
+                disc["comments"]["nodes"].extend(more.get("nodes", []))
+                disc["comments"]["pageInfo"] = more.get(
+                    "pageInfo", {"hasNextPage": False, "endCursor": None}
+                )
+            all_open.append(disc)
+        if not page_info.get("hasNextPage"):
+            break
+        cursor = page_info.get("endCursor")
+    return all_open
 
 
 def _process_discussion_dict(
@@ -508,18 +631,31 @@ def _process_discussion_dict(
         )
         return False
 
-    if has_bot_replied(discussion, bot_login=bot_login):
-        logger.info("Discussion #%d 已有 Bot 回复，跳过", number)
+    if discussion.get("closed"):
+        logger.info("Discussion #%d 已关闭，跳过", number)
         return False
 
+    plan = compute_reply_plan(discussion, bot_login=bot_login)
+    if plan is None:
+        logger.info("Discussion #%d 已有 Bot 回复且无新追问，跳过", number)
+        return False
+
+    question, history = plan
     title = discussion.get("title", "").strip()
-    body = discussion.get("body", "").strip()
-    question = f"{title}\n\n{body}" if body else title
     disc_id = discussion["id"]
     disc_url = discussion.get("url", f"#{number}")
 
-    logger.info("正在为 Discussion #%d 生成回答: %r", number, title)
-    answer = qa_engine.ask(question)
+    if history:
+        logger.info(
+            "正在为 Discussion #%d 生成追问回答（history=%d 条）: %r",
+            number,
+            len(history),
+            title,
+        )
+    else:
+        logger.info("正在为 Discussion #%d 生成回答: %r", number, title)
+
+    answer = qa_engine.ask(question, history=history)
     reply_body = build_reply(answer)
 
     if dry_run:
@@ -647,9 +783,10 @@ def run_scan_mode(
     dry_run: bool = False,
     bot_login: Optional[str] = None,
 ) -> None:
-    """定时扫描模式：处理组织 Q&A 分类中所有未回复的 Discussion。"""
+    """全量扫描模式：处理组织 Q&A 分类下所有 open discussion，
+    自动回复未答复的 discussion 以及 Bot 回复后又出现新追问的 discussion。"""
     discussions = scan_org_qa_discussions(client, org, org_qa_category_id)
-    logger.info("找到 %d 条组织 Q&A 讨论", len(discussions))
+    logger.info("找到 %d 条 open 状态的组织 Q&A 讨论", len(discussions))
     replied = 0
     for disc in discussions:
         if _process_discussion_dict(
@@ -689,7 +826,8 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     group.add_argument(
         "--scan-org",
         action="store_true",
-        help="扫描组织 Q&A 分类中所有未回复的 Discussion（定时任务使用）",
+        help="全量扫描组织 Q&A 分类下所有 open discussion，"
+             "回复未答复的以及 Bot 回复后又有新追问的 discussion（手动 workflow_dispatch 使用）",
     )
     parser.add_argument(
         "--dry-run",

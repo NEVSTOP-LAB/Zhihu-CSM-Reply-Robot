@@ -11,21 +11,10 @@ on:
   repository_dispatch:
     types: [org_discussion_created]
 
-  # 定时扫描组织级 Discussion（作为 webhook 漏发时的兜底，组织 Discussion 不触发 discussion 事件）
-  schedule:
-    - cron: '*/30 * * * *'
-
-  # 手动触发（可指定具体 Discussion 编号或 dry-run）
+  # 手动触发：对组织 Q&A 分类下所有 open 的 discussion 做全量扫描，
+  # 自动回复未答复的 discussion 以及在 Bot 回复后又有新追问的 discussion。
   workflow_dispatch:
     inputs:
-      discussion_number:
-        description: '仓库 Discussion 编号（与 org_discussion_number 二选一）'
-        required: false
-        type: string
-      org_discussion_number:
-        description: '组织 Discussion 编号（与 discussion_number 二选一）'
-        required: false
-        type: string
       dry_run:
         description: 'Dry-run 模式（只打印不发布评论）'
         required: false
@@ -37,7 +26,7 @@ on:
 
 # 同一时刻只允许一个实例运行，避免重复回复
 concurrency:
-  group: csm-qa-bot-${{ github.event.discussion.number || github.event.client_payload.discussion_number || inputs.discussion_number || inputs.org_discussion_number || 'scan' }}
+  group: csm-qa-bot-${{ github.event.discussion.number || github.event.client_payload.discussion_number || 'scan' }}
   cancel-in-progress: false
 
 jobs:
@@ -79,11 +68,45 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-hf-
 
+      # 解析 csm-wiki 远程仓库当前 HEAD commit SHA，用于 vector store 缓存 key。
+      # 必须在 actions/cache 之前执行，否则 cache key 会与实际 wiki 内容脱节，
+      # 导致每次都重建 RAG（参见 csm_qa/wiki_updater.py 中的 commit 比对逻辑）。
+      - name: Resolve csm-wiki latest commit SHA
+        id: wiki-sha
+        env:
+          # 使用 GITHUB_TOKEN 提升 API 速率限制（公开仓库读取 API 即使无 token 也可用）
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          SOURCE_FILE="csm-wiki/wiki_source.json"
+          REPO_URL=$(python -c "import json; print(json.load(open('$SOURCE_FILE'))['url'])")
+          # 形如 https://github.com/NEVSTOP-LAB/CSM-Wiki(.git)? → owner/repo
+          SLUG=$(echo "$REPO_URL" | sed -E 's#^https?://github\.com/([^/]+/[^/]+?)(\.git)?/?$#\1#')
+          # 不要硬编码分支名：先查询仓库 default_branch，与
+          # csm_qa/wiki_updater.fetch_latest_commit_id 的 main→master 兜底保持一致
+          REPO_API_URL="https://api.github.com/repos/${SLUG}"
+          DEFAULT_BRANCH=$(curl -fsSL \
+            -H "Accept: application/vnd.github.v3+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            "$REPO_API_URL" | python -c "import sys,json; print(json.load(sys.stdin)['default_branch'])")
+          API_URL="https://api.github.com/repos/${SLUG}/commits/${DEFAULT_BRANCH}"
+          SHA=$(curl -fsSL \
+            -H "Accept: application/vnd.github.v3+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            "$API_URL" | python -c "import sys,json; print(json.load(sys.stdin)['sha'])")
+          echo "csm-wiki ($SLUG) default branch: $DEFAULT_BRANCH, HEAD: $SHA"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
       - name: Cache vector store
         uses: actions/cache@v4
         with:
-          path: .csm_qa/vector_store
-          key: ${{ runner.os }}-vectorstore-${{ hashFiles('csm-wiki/**') }}
+          # 同时缓存 wiki_source.json 与 wiki 克隆目录，
+          # 使得 check_and_update_wiki 在缓存命中后能识别"已是最新"并跳过重建。
+          path: |
+            .csm_qa/vector_store
+            csm-wiki/wiki_source.json
+            csm-wiki/remote
+          key: ${{ runner.os }}-vectorstore-${{ steps.wiki-sha.outputs.sha }}
           restore-keys: |
             ${{ runner.os }}-vectorstore-
 
@@ -99,14 +122,6 @@ jobs:
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
         run: python scripts/discussion_bot.py --event
 
-      - name: Run bot (scheduled scan for org discussions)
-        if: github.event_name == 'schedule'
-        env:
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          CSM_QA_API_KEY: ${{ secrets.CSM_QA_API_KEY }}
-          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
-        run: python scripts/discussion_bot.py --scan-org
-
       - name: Run bot (repository_dispatch from webhook relay)
         if: github.event_name == 'repository_dispatch'
         env:
@@ -121,21 +136,14 @@ jobs:
           fi
           python scripts/discussion_bot.py --org-discussion-number "$DISCUSSION_NUMBER"
 
-      - name: Run bot (manual trigger)
+      - name: Run bot (manual full scan)
         if: github.event_name == 'workflow_dispatch'
         env:
           GITHUB_REPOSITORY: ${{ github.repository }}
           CSM_QA_API_KEY: ${{ secrets.CSM_QA_API_KEY }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
         run: |
-          if [ -n "${{ inputs.org_discussion_number }}" ]; then
-            ARGS="--org-discussion-number ${{ inputs.org_discussion_number }}"
-          elif [ -n "${{ inputs.discussion_number }}" ]; then
-            ARGS="--discussion-number ${{ inputs.discussion_number }}"
-          else
-            echo "Error: 必须提供 discussion_number 或 org_discussion_number 之一" >&2
-            exit 1
-          fi
+          ARGS="--scan-org"
           if [ "${{ inputs.dry_run }}" = "true" ]; then
             ARGS="$ARGS --dry-run"
           fi
