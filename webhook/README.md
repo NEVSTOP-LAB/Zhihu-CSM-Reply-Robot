@@ -98,7 +98,7 @@ wrangler deploy
 
 | Secret | 用途 |
 | --- | --- |
-| `CSM_QA_API_KEY` | Fine-grained PAT，用于 GraphQL 读写 Discussions。**必须同时授权两个仓库**：`<org>/CSM-QA-Robot`（自身）和 `<org>/.github`（org-level Q&A discussions 的实际归属仓库），权限均需 `Discussions: Read & Write`。如组织级 discussions 实际归属其他仓库，请同步设置 workflow 的 `DISCUSSION_SOURCE_REPO` 环境变量。 |
+| `CSM_QA_GH_TOKEN` | GitHub Fine-grained PAT，用于 GraphQL 读写 Discussions 以及 Actions checkout 拉取 submodule。**必须同时授权两个仓库**：`<org>/CSM-QA-Robot`（自身）和 `<org>/.github`（org-level Q&A discussions 的实际归属仓库），权限均需 `Discussions: Read & Write`（自身仓库还需 `Contents: Read`）。如组织级 discussions 实际归属其他仓库，请同步设置 workflow 的 `DISCUSSION_SOURCE_REPO` 环境变量。 |
 | `LLM_API_KEY` | DeepSeek / 其他 LLM key |
 
 > Worker 的三个 secret（`WEBHOOK_SECRET` / `GITHUB_APP_ID` / `GITHUB_APP_PRIVATE_KEY`）

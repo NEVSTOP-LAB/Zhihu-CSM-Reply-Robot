@@ -181,10 +181,14 @@ def test_ask_passes_rag_contexts_into_system(qa):
         assert any(c[:10] in sys_msg for c in result.contexts)
 
 
-def test_from_env_reads_legacy_env_vars(monkeypatch, tmp_dir):
+def test_from_env_reads_unified_env_vars(monkeypatch, tmp_dir):
+    """from_env 只识别统一后的 LLM_* 环境变量；旧的 CSM_QA_API_KEY 不再生效。"""
     monkeypatch.setenv("LLM_API_KEY", "sk-from-env")
-    monkeypatch.delenv("CSM_QA_API_KEY", raising=False)
-    monkeypatch.delenv("CSM_QA_PROVIDER", raising=False)
+    # 旧别名应被完全忽略（且即便存在，也不应污染 LLM key）
+    monkeypatch.setenv("CSM_QA_API_KEY", "github-pat-should-be-ignored")
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.delenv("LLM_BASE_URL", raising=False)
 
     with patch("csm_qa.api.LLMClient") as mock_llm_cls, \
             patch("csm_qa.api.EmbeddingFunction", return_value=FakeEmbedding()):
@@ -195,7 +199,7 @@ def test_from_env_reads_legacy_env_vars(monkeypatch, tmp_dir):
             auto_sync_wiki=False,
         )
         assert qa.provider == "deepseek"
-        # LLMClient 收到了正确的 api_key
+        # LLMClient 收到了 LLM_API_KEY，而不是被 CSM_QA_API_KEY 覆盖
         kwargs = mock_llm_cls.call_args.kwargs
         assert kwargs["api_key"] == "sk-from-env"
 

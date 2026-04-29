@@ -14,7 +14,7 @@ manual 模式（手动触发或 workflow_dispatch）：
 
 环境变量
 ──────────────────
-CSM_QA_API_KEY   Fine-grained PAT（需要 repository discussions: read & write 权限）
+CSM_QA_GH_TOKEN  GitHub Fine-grained PAT（需要 repository discussions: read & write 权限）
 LLM_API_KEY      DeepSeek / 其他 LLM 的 API Key
 GITHUB_REPOSITORY  格式 owner/repo，如 NEVSTOP-LAB/CSM-QA-Robot（Actions 自动注入）
 GITHUB_EVENT_PATH  event 模式时由 Actions 自动注入
@@ -83,7 +83,7 @@ class GitHubGraphQL:
 
     def __init__(self, token: str) -> None:
         if not token:
-            raise ValueError("GitHub token (CSM_QA_API_KEY) 未配置")
+            raise ValueError("GitHub token (CSM_QA_GH_TOKEN) 未配置")
         self._token = token
 
     def query(self, gql: str, variables: Optional[dict] = None) -> dict:
@@ -886,9 +886,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = parse_args(argv)
 
     # ── 读取 Token ──────────────────────────────────────────────────────────
-    gh_token = os.environ.get("CSM_QA_API_KEY", "").strip()
+    gh_token = os.environ.get("CSM_QA_GH_TOKEN", "").strip()
     if not gh_token:
-        logger.error("CSM_QA_API_KEY 未配置（Fine-grained PAT）")
+        logger.error("CSM_QA_GH_TOKEN 未配置（GitHub Fine-grained PAT）")
         return 1
 
     # ── 初始化 ───────────────────────────────────────────────────────────────

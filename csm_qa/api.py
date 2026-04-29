@@ -148,24 +148,28 @@ class CSM_QA:
 
     @classmethod
     def from_env(cls, **overrides) -> "CSM_QA":
-        """从环境变量构造，便于复用旧的 ``LLM_API_KEY`` 等约定。
+        """从环境变量构造。
 
-        识别的环境变量：
+        识别的环境变量（统一以 ``LLM_*`` 前缀，所有旧别名已移除）：
 
-        - ``CSM_QA_API_KEY`` / ``LLM_API_KEY``：API Key
-        - ``CSM_QA_PROVIDER``：provider
-        - ``CSM_QA_MODEL`` / ``LLM_MODEL``：模型名
-        - ``CSM_QA_BASE_URL`` / ``LLM_BASE_URL``：base URL
+        - ``LLM_API_KEY``：LLM 服务商（DeepSeek 等）的 API Key
+        - ``LLM_PROVIDER``：provider，默认 ``deepseek``
+        - ``LLM_MODEL``：模型名（省略时使用 provider 预设）
+        - ``LLM_BASE_URL``：base URL（省略时使用 provider 预设）
+
+        .. note::
+           ``CSM_QA_GH_TOKEN`` 是另一个用途完全不同的环境变量
+           （GitHub Fine-grained PAT，仅供 ``scripts/discussion_bot.py``
+           访问 GitHub Discussions），**不会**被本方法读取为 LLM key。
 
         其余参数可通过 ``**overrides`` 直接覆盖。
         """
         env = os.environ
-        api_key = env.get("CSM_QA_API_KEY") or env.get("LLM_API_KEY", "")
         kwargs: dict = {
-            "api_key": api_key,
-            "provider": env.get("CSM_QA_PROVIDER", "deepseek"),
-            "model": env.get("CSM_QA_MODEL") or env.get("LLM_MODEL"),
-            "base_url": env.get("CSM_QA_BASE_URL") or env.get("LLM_BASE_URL"),
+            "api_key": env.get("LLM_API_KEY", ""),
+            "provider": env.get("LLM_PROVIDER", "deepseek"),
+            "model": env.get("LLM_MODEL"),
+            "base_url": env.get("LLM_BASE_URL"),
         }
         kwargs.update(overrides)
         return cls(**kwargs)
