@@ -38,12 +38,13 @@ export default {
       return new Response("Method Not Allowed", { status: 405 });
     }
 
-    // 1. 读取 raw body（验签必须用未解析的字节）
-    const rawBody = await request.text();
+    // 1. 读取 raw body 字节（验签必须对原始字节做 HMAC，避免任何
+    //    text decode → encode 来回过程引入编码/规范化差异导致误判）
+    const rawBodyBuf = await request.arrayBuffer();
 
-    // 2. 验签
+    // 2. 验签（直接传原始字节）
     const signature = request.headers.get("x-hub-signature-256") || "";
-    const ok = await verifySignature(env.WEBHOOK_SECRET, rawBody, signature);
+    const ok = await verifySignature(env.WEBHOOK_SECRET, rawBodyBuf, signature);
     if (!ok) {
       return new Response("Invalid signature", { status: 401 });
     }
@@ -57,9 +58,11 @@ export default {
       return new Response(`Ignored event: ${eventType}`, { status: 200 });
     }
 
+    // 验签通过后再把字节解码为字符串供 JSON.parse 使用
     let payload;
     try {
-      payload = JSON.parse(rawBody);
+      const rawBodyText = new TextDecoder("utf-8").decode(rawBodyBuf);
+      payload = JSON.parse(rawBodyText);
     } catch (_e) {
       return new Response("Invalid JSON", { status: 400 });
     }
@@ -122,20 +125,20 @@ export default {
 
 // ── 辅助函数 ──────────────────────────────────────────────────────────────────
 
-/** 用 HMAC-SHA256 校验 GitHub webhook 签名，常量时间比较。 */
+/** 用 HMAC-SHA256 校验 GitHub webhook 签名，常量时间比较。
+ *  rawBody 必须是 ArrayBuffer（直接对原始字节计算，避免编码差异）。 */
 async function verifySignature(secret, rawBody, signatureHeader) {
   if (!secret || !signatureHeader.startsWith("sha256=")) return false;
   const expected = signatureHeader.slice("sha256=".length);
 
-  const enc = new TextEncoder();
   const key = await crypto.subtle.importKey(
     "raw",
-    enc.encode(secret),
+    new TextEncoder().encode(secret),
     { name: "HMAC", hash: "SHA-256" },
     false,
     ["sign"],
   );
-  const sigBuf = await crypto.subtle.sign("HMAC", key, enc.encode(rawBody));
+  const sigBuf = await crypto.subtle.sign("HMAC", key, rawBody);
   const actual = bufToHex(sigBuf);
 
   return timingSafeEqual(expected, actual);
