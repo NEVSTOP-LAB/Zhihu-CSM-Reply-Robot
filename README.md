@@ -101,8 +101,8 @@ qa = CSM_QA(
 
 ```python
 qa = CSM_QA.from_env()
-# 兼容旧变量：LLM_API_KEY / LLM_MODEL / LLM_BASE_URL
-# 新变量：CSM_QA_API_KEY / CSM_QA_PROVIDER / CSM_QA_MODEL / CSM_QA_BASE_URL
+# 识别的环境变量（统一以 LLM_* 前缀，无别名）：
+# LLM_API_KEY / LLM_PROVIDER / LLM_MODEL / LLM_BASE_URL
 ```
 
 ---
