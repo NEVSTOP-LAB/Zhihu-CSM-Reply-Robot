@@ -157,11 +157,6 @@ class CSM_QA:
         - ``LLM_MODEL``：模型名（省略时使用 provider 预设）
         - ``LLM_BASE_URL``：base URL（省略时使用 provider 预设）
 
-        .. note::
-           ``CSM_QA_GH_TOKEN`` 是另一个用途完全不同的环境变量
-           （GitHub Fine-grained PAT，仅供 ``scripts/discussion_bot.py``
-           访问 GitHub Discussions），**不会**被本方法读取为 LLM key。
-
         其余参数可通过 ``**overrides`` 直接覆盖。
         """
         env = os.environ
