@@ -164,7 +164,6 @@ qa = CSM_QA(api_key="sk", system_prompt="You are a helpful general-purpose assis
 │   ├── basic_usage.py
 │   └── multi_turn.py
 ├── tests/                  # 单元测试
-├── docs/                   # 调研与设计文档（仅参考，非运行时依赖）
 ├── pyproject.toml
 └── requirements.txt
 ```
