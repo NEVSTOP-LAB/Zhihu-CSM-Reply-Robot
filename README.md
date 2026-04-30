@@ -61,7 +61,7 @@ CSM_QA(
     model=None,                             # None → 取 provider 默认
     base_url=None,                          # None → 取 provider 默认
     temperature=0.5,
-    max_tokens=512,
+    max_tokens=2048,
     max_retries=3,
     request_timeout=60.0,
 
@@ -71,10 +71,11 @@ CSM_QA(
     embedding_model="BAAI/bge-small-zh-v1.5",
     embedding_api_key=None,
     embedding_base_url=None,
-    top_k=3,
+    top_k=6,
     similarity_threshold=0.72,
 
     system_prompt=None,                     # None → 内置 CSM/LabVIEW prompt
+    wiki_base_url="https://github.com/NEVSTOP-LAB/CSM-Wiki/blob/main",  # 关键信息回答时的链接前缀
     auto_sync_wiki=True,                    # 首次运行若向量库为空，自动同步
 )
 ```

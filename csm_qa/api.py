@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Iterable, Optional, Union
 
 from csm_qa.llm import LLMClient
-from csm_qa.prompts import DEFAULT_SYSTEM_PROMPT, build_system_message
+from csm_qa.prompts import DEFAULT_SYSTEM_PROMPT, DEFAULT_WIKI_BASE_URL, build_system_message
 from csm_qa.providers import resolve_endpoint
 from csm_qa.rag import EmbeddingFunction, EmbeddingProvider, RAGRetriever
 from csm_qa.types import AnswerResult, Message
@@ -58,6 +58,8 @@ class CSM_QA:
         top_k: RAG 返回片段数。
         similarity_threshold: 相似度阈值。
         system_prompt: 自定义 system prompt；``None`` 用内置默认（CSM/LabVIEW 场景）。
+        wiki_base_url: csm-wiki 仓库链接前缀；用于把检索到的片段拼成可点击 URL 注入提示词，
+            默认指向 ``https://github.com/NEVSTOP-LAB/CSM-Wiki/blob/main``。
         auto_sync_wiki: 构造时若向量库为空则自动同步 wiki，默认 ``True``。
     """
 
@@ -69,7 +71,7 @@ class CSM_QA:
         model: Optional[str] = None,
         base_url: Optional[str] = None,
         temperature: float = 0.5,
-        max_tokens: int = 512,
+        max_tokens: int = 2048,
         max_retries: int = 3,
         request_timeout: float = 60.0,
         wiki_dir: str | Path = "csm-wiki/remote",
@@ -78,9 +80,10 @@ class CSM_QA:
         embedding_model: str = "BAAI/bge-small-zh-v1.5",
         embedding_api_key: Optional[str] = None,
         embedding_base_url: Optional[str] = None,
-        top_k: int = 3,
+        top_k: int = 6,
         similarity_threshold: float = 0.72,
         system_prompt: Optional[str] = None,
+        wiki_base_url: str = DEFAULT_WIKI_BASE_URL,
         auto_sync_wiki: bool = True,
     ) -> None:
         if not api_key:
@@ -119,6 +122,7 @@ class CSM_QA:
 
         # ─── Prompt ──────────────────────────────────────────────
         self.system_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
+        self.wiki_base_url = wiki_base_url
         self.top_k = top_k
         self.similarity_threshold = similarity_threshold
 
@@ -243,12 +247,12 @@ class CSM_QA:
             "model": _get("llm", "model"),
             "base_url": _get("llm", "base_url"),
             "temperature": _getfloat("llm", "temperature", 0.5),
-            "max_tokens": _getint("llm", "max_tokens", 512),
+            "max_tokens": _getint("llm", "max_tokens", 2048),
             "max_retries": _getint("llm", "max_retries", 3),
             "request_timeout": _getfloat("llm", "request_timeout", 60.0),
             "wiki_dir": _get("rag", "wiki_dir", "csm-wiki/remote"),
             "vector_store_dir": _get("rag", "vector_store_dir", ".csm_qa/vector_store"),
-            "top_k": _getint("rag", "top_k", 3),
+            "top_k": _getint("rag", "top_k", 6),
             "similarity_threshold": _getfloat("rag", "similarity_threshold", 0.72),
             "auto_sync_wiki": _getbool("rag", "auto_sync_wiki", True),
             "embedding_provider": _get("embedding", "provider", "local"),
@@ -258,6 +262,7 @@ class CSM_QA:
             "embedding_api_key": _get("embedding", "api_key"),
             "embedding_base_url": _get("embedding", "base_url"),
             "system_prompt": _get("prompt", "system_prompt"),
+            "wiki_base_url": _get("prompt", "wiki_base_url", DEFAULT_WIKI_BASE_URL),
         }
         kwargs.update(overrides)
         return cls(**kwargs)
@@ -314,7 +319,7 @@ class CSM_QA:
 
         # 1) 拼装检索 query：把最近一轮 user 提问也并入，提升追问场景检索质量
         retrieval_query = self._build_retrieval_query(question, history)
-        contexts = self._rag.retrieve(
+        hits = self._rag.retrieve_with_meta(
             retrieval_query,
             k=top_k if top_k is not None else self.top_k,
             threshold=(
@@ -323,9 +328,12 @@ class CSM_QA:
                 else self.similarity_threshold
             ),
         )
+        contexts = [hit["text"] for hit in hits]
 
         # 2) 组装 messages
-        system_content = build_system_message(self.system_prompt, contexts)
+        system_content = build_system_message(
+            self.system_prompt, hits, wiki_base_url=self.wiki_base_url
+        )
         messages: list[dict] = [{"role": "system", "content": system_content}]
         messages.extend(self._normalize_history(history))
         messages.append({"role": "user", "content": question})

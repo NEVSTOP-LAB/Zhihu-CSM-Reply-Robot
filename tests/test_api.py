@@ -181,6 +181,56 @@ def test_ask_passes_rag_contexts_into_system(qa):
         assert any(c[:10] in sys_msg for c in result.contexts)
 
 
+def test_ask_includes_wiki_link_in_system_message(qa):
+    """system message 中应包含指向 csm-wiki 的源链接，便于模型回答时引用为超链接。"""
+    result = qa.ask_detailed("CSM 状态机 切换")
+    sys_msg = result.prompt_messages[0]["content"]
+    if result.contexts:
+        assert "https://github.com/NEVSTOP-LAB/CSM-Wiki/blob/main/" in sys_msg
+        assert "csm.md" in sys_msg
+
+
+def test_default_max_tokens_and_top_k_are_increased(tmp_dir):
+    """默认 token 上限与检索深度应分别提升到 2048/6。"""
+    with patch("csm_qa.api.LLMClient") as mock_llm_cls, \
+            patch("csm_qa.api.EmbeddingFunction", return_value=FakeEmbedding()):
+        mock_llm_cls.return_value = MagicMock()
+        qa = CSM_QA(
+            api_key="sk",
+            wiki_dir=tmp_dir / "wiki",
+            vector_store_dir=tmp_dir / "store",
+            auto_sync_wiki=False,
+        )
+    assert qa.top_k == 6
+    kw = mock_llm_cls.call_args.kwargs
+    assert kw["max_tokens"] == 2048
+
+
+def test_custom_wiki_base_url_used_in_system_message(tmp_dir):
+    wiki = tmp_dir / "wiki"
+    store = tmp_dir / "store"
+    wiki.mkdir()
+    (wiki / "csm.md").write_text(
+        "# CSM 框架\nCSM 是 Communicable State Machine，状态切换 通过 消息 通信",
+        encoding="utf-8",
+    )
+    with patch("csm_qa.api.LLMClient") as mock_llm_cls, \
+            patch("csm_qa.api.EmbeddingFunction", return_value=FakeEmbedding()):
+        mock_llm = MagicMock()
+        mock_llm.chat.return_value = ("ok", Usage())
+        mock_llm_cls.return_value = mock_llm
+        qa = CSM_QA(
+            api_key="sk",
+            wiki_dir=wiki,
+            vector_store_dir=store,
+            similarity_threshold=0.0,
+            wiki_base_url="https://wiki.example.com/csm",
+        )
+        qa.ask("CSM 状态机 切换")
+        sys_msg = mock_llm.chat.call_args.args[0][0]["content"]
+        assert "https://wiki.example.com/csm/csm.md" in sys_msg
+
+
 def test_from_env_reads_unified_env_vars(monkeypatch, tmp_dir):
     """from_env 只识别统一后的 LLM_* 环境变量；旧的 CSM_QA_API_KEY 不再生效。"""
     monkeypatch.setenv("LLM_API_KEY", "sk-from-env")

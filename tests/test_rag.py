@@ -138,6 +138,22 @@ def test_retrieve_returns_relevant_chunks(retriever: RAGRetriever):
     assert any("CSM" in r and "状态机" in r for r in results)
 
 
+def test_retrieve_with_meta_returns_source_and_heading(retriever: RAGRetriever):
+    _write(
+        retriever.wiki_dir / "csm.md",
+        "# CSM 状态机\nCSM 状态机 切换 通过 消息 通信",
+    )
+    retriever.sync_wiki()
+
+    hits = retriever.retrieve_with_meta("CSM 状态机 切换", k=1, threshold=0.0)
+    assert len(hits) == 1
+    hit = hits[0]
+    assert set(hit.keys()) >= {"text", "source", "heading", "similarity"}
+    assert hit["source"] == "csm.md"
+    assert hit["heading"] == "CSM 状态机"
+    assert "CSM" in hit["text"]
+
+
 def test_retrieve_logs_hit_details(retriever: RAGRetriever, caplog):
     _write(
         retriever.wiki_dir / "csm.md",

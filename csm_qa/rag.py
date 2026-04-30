@@ -370,7 +370,7 @@ class RAGRetriever:
         k: int = 3,
         threshold: float = 0.72,
     ) -> list[str]:
-        """检索 top-k 个相关片段。
+        """检索 top-k 个相关片段，仅返回文本（向后兼容）。
 
         Args:
             query: 查询文本。
@@ -378,7 +378,25 @@ class RAGRetriever:
             threshold: 余弦相似度阈值，低于该阈值的片段被过滤。
 
         Returns:
-            按相关度排序的文档片段列表。
+            按相关度排序的文档片段文本列表。
+        """
+        return [hit["text"] for hit in self.retrieve_with_meta(query, k=k, threshold=threshold)]
+
+    def retrieve_with_meta(
+        self,
+        query: str,
+        k: int = 3,
+        threshold: float = 0.72,
+    ) -> list[dict]:
+        """检索 top-k 个相关片段，并附带元数据。
+
+        Args:
+            query: 查询文本。
+            k: 最多返回片段数。
+            threshold: 余弦相似度阈值，低于该阈值的片段被过滤。
+
+        Returns:
+            按相关度排序的字典列表，每项包含 ``text``/``source``/``heading``/``similarity``。
         """
         if not query or not query.strip():
             return []
@@ -404,7 +422,7 @@ class RAGRetriever:
             logger.warning("向量检索失败: %s", exc)
             return []
 
-        out: list[str] = []
+        out: list[dict] = []
         hit_logs: list[str] = []
         if res and res.get("documents"):
             metadatas_list = res.get("metadatas") or []
@@ -418,7 +436,6 @@ class RAGRetriever:
                     # cosine = 1 - dist^2 / 2
                     similarity = 1 - (dist ** 2) / 2
                     if similarity >= threshold:
-                        out.append(doc)
                         metadata = (
                             metadatas[index - 1]
                             if index - 1 < len(metadatas)
@@ -426,6 +443,14 @@ class RAGRetriever:
                         ) or {}
                         source = metadata.get("source", "(unknown)")
                         heading = metadata.get("heading", "Untitled")
+                        out.append(
+                            {
+                                "text": doc,
+                                "source": source,
+                                "heading": heading,
+                                "similarity": similarity,
+                            }
+                        )
                         hit_logs.append(
                             f"#{index} source={source} heading={heading} "
                             f"similarity={similarity:.3f} preview={_preview_text(doc)}"
