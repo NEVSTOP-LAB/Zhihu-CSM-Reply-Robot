@@ -190,8 +190,8 @@ def test_ask_includes_wiki_link_in_system_message(qa):
         assert "csm.md" in sys_msg
 
 
-def test_default_max_tokens_and_top_k_are_increased(tmp_dir):
-    """默认 token 上限与检索深度应分别提升到 2048/6。"""
+def test_default_max_tokens_and_top_k_values(tmp_dir):
+    """默认 token 上限与检索深度应分别为 1024/6。"""
     with patch("csm_llm_qa.api.LLMClient") as mock_llm_cls, \
             patch("csm_llm_qa.api.EmbeddingFunction", return_value=FakeEmbedding()):
         mock_llm_cls.return_value = MagicMock()
@@ -203,7 +203,7 @@ def test_default_max_tokens_and_top_k_are_increased(tmp_dir):
         )
     assert qa.top_k == 6
     kw = mock_llm_cls.call_args.kwargs
-    assert kw["max_tokens"] == 2048
+    assert kw["max_tokens"] == 1024
 
 
 def test_custom_wiki_base_url_used_in_system_message(tmp_dir):
