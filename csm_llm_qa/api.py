@@ -71,7 +71,7 @@ class CSM_QA:
         model: Optional[str] = None,
         base_url: Optional[str] = None,
         temperature: float = 0.5,
-        max_tokens: int = 2048,
+        max_tokens: int = 1024,
         max_retries: int = 3,
         request_timeout: float = 60.0,
         wiki_dir: str | Path = "csm-wiki/remote",
@@ -185,7 +185,7 @@ class CSM_QA:
             model     = deepseek-chat
             base_url  =
             temperature     = 0.5
-            max_tokens      = 2048
+            max_tokens      = 1024
             max_retries     = 3
             request_timeout = 60.0
 
@@ -248,7 +248,7 @@ class CSM_QA:
             "model": _get("llm", "model"),
             "base_url": _get("llm", "base_url"),
             "temperature": _getfloat("llm", "temperature", 0.5),
-            "max_tokens": _getint("llm", "max_tokens", 2048),
+            "max_tokens": _getint("llm", "max_tokens", 1024),
             "max_retries": _getint("llm", "max_retries", 3),
             "request_timeout": _getfloat("llm", "request_timeout", 60.0),
             "wiki_dir": _get("rag", "wiki_dir", "csm-wiki/remote"),
